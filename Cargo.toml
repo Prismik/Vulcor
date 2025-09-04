@@ -1,0 +1,18 @@
+[package]
+name = "vulcor"
+authors = ["Francis Beauchamp <francis.beauchampsc@gmail.com>"]
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4"
+ash = "0.38.0"
+ash-window = "0.13.0"
+tobj = "4.0.3"
+ahash = "0.8.12"
+cgmath = "0.18.0"
+raw-window-handle = "0.6.2"
+image = "0.25.8"
+winit = "0.30.12"

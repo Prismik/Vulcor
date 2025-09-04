@@ -7,7 +7,6 @@ use log::{info, error};
 use winit::{
     application::ApplicationHandler, dpi::LogicalSize, event::{self, Event, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, window::{Window, WindowAttributes, WindowId}
 };
-mod utils;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 const VALIDATION_LAYERS: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];

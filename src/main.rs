@@ -1,9 +1,11 @@
-use ash::{vk, Entry, Instance, ext::debug_utils};
+mod debug;
+
+use ash::{vk, Entry, Instance, ext::debug_utils, ext::debug_report};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
-    error::Error, ffi::{c_char, CStr, CString}, result::Result
+    error::Error, ffi::{c_char, c_void, CStr, CString}, result::Result
 };
-use log::{info, error};
+use log::{debug, info, error, warn, trace};
 use winit::{
     application::ApplicationHandler, dpi::LogicalSize, event::{self, Event, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, window::{Window, WindowAttributes, WindowId}
 };
@@ -11,38 +13,43 @@ use winit::{
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 const VALIDATION_LAYERS: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];
 
+struct App {
+    name: String,
+    vulcor: Option<Vulcor>
+}
+
+impl App {
+    fn new() -> App {
+        Self { name: "Vulcor".to_string(), vulcor: None }
+    }
+}
+
 struct Vulcor {
     name: String,
-    window: Option<Window>,
-    entry: Option<Entry>,
-    instance: Option<Instance>
+    window: Window,
+    entry: Entry,
+    instance: Instance,
+    messenger: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>
 }
 
 impl Vulcor {
-    fn new() -> Result<Self, Box<dyn Error>> {
+    fn new(window: Window) -> Result<Self, Box<dyn Error>> {
         info!("Creating application");
         let title = "Vulcor";
+        let entry = unsafe { ash::Entry::load().expect("Failed to create entry") };
+        let instance = Self::create_instance(CString::new(title)?.as_c_str(), &entry, &window)?;
+        let messenger = debug::setup_debug_messenger(&entry, &instance);
         Ok(Self{
             name: title.to_string(),  
-            window: None,
-            entry: None,
-            instance: None
+            window,
+            entry,
+            instance,
+            messenger
         })
     }
 
-    fn is_initialized(&self) -> bool {
-        return self.entry.is_some() && self.instance.is_some();
-    }
 
-    fn init(&mut self) -> Result<(), Box<dyn Error>> {
-        let entry = unsafe { ash::Entry::load().expect("Failed to create entry") };
-        self.entry = Some(entry);
-        let instance = self.create_instance(CString::new(self.name.as_str())?.as_c_str())?;
-        self.instance = Some(instance);
-        Ok(())
-    }
-
-    fn create_instance(&self, named: &CStr) -> Result<Instance, Box<dyn Error>> {
+    fn create_instance(named: &CStr, entry: &Entry, window: &Window) -> Result<Instance, Box<dyn Error>> {
         let app_info = vk::ApplicationInfo::default()
             .application_name(named)
             .application_version(0)
@@ -50,7 +57,7 @@ impl Vulcor {
             .engine_version(0)
             .api_version(vk::API_VERSION_1_3);
 
-        let handle = self.window.as_ref().unwrap().display_handle()?.as_raw();
+        let handle = window.display_handle()?.as_raw();
         let mut extension_names = ash_window::enumerate_required_extensions(handle)
             .unwrap()
             .to_vec();
@@ -80,81 +87,73 @@ impl Vulcor {
             .map(|raw_name| raw_name.as_ptr())
             .collect();
 
+        let mut debug_info = debug::create_debug_info();
         if VALIDATION_ENABLED {
-            if self.validation_layers_supported() {
-                info = info.enabled_layer_names(&layers_names_raw);
+            if debug::validation_layers_supported(entry) {
+                info = info.enabled_layer_names(&layers_names_raw)
+                    .push_next(&mut debug_info);
             } else {
                 panic!("Validation layers not supported")
             }
         }
 
-        unsafe { Ok(self.entry.as_ref().unwrap().create_instance(&info, None)?) }
-    }
-
-    fn validation_layers_supported(&self) -> bool {
-        let mut found: bool = true;
-        for required in VALIDATION_LAYERS.iter() {
-            found = unsafe {
-                self.entry.as_ref().unwrap()
-                    .enumerate_instance_layer_properties()
-                    .unwrap()
-                    .iter()
-                    .any(|layer| {
-                        let name = CStr::from_ptr(layer.layer_name.as_ptr());
-                        required == &name
-                    })
-            };
-
-            if !found {
-                break;
-            }
-        }
-
-        return found
+        unsafe { Ok(entry.create_instance(&info, None)?) }
     }
 
     fn render(&self) {
-        println!("render()");
+        
     }
 
-    unsafe fn cleanup(&mut self) {
-        self.instance.take().unwrap().destroy_instance(None);
-        self.entry.take();
+    fn cleanup(&self) {
+        if let Some((report, callback)) = self.messenger.as_ref().take() {
+            unsafe { report.destroy_debug_utils_messenger(*callback, None) };
+        }
+        unsafe { self.instance.destroy_instance(None) };
     }
 }
 
-impl ApplicationHandler for Vulcor {
+impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attributes = Window::default_attributes().with_title(self.name.as_str());
-        self.window = Some(event_loop.create_window(window_attributes).unwrap());
-        
-        if !self.is_initialized() {
-            let _ = self.init();
-            println!("Instance initialized")
+        match self.vulcor {
+            None => { 
+                let window_attributes = Window::default_attributes().with_title(self.name.as_str());
+                let window = event_loop.create_window(window_attributes).unwrap();
+                self.vulcor = match Vulcor::new(window) {
+                    Ok(vulcor) => Some(vulcor),
+                    Err(error) => panic!("Unable to create Vulcor object {}", error)
+                };
+            },
+            _ => ()
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         // println!("{event:?}");
-        match event {
-            WindowEvent::RedrawRequested => self.render(),
-            WindowEvent::CloseRequested => {
-                unsafe { self.cleanup() };
-                event_loop.exit()
-            },
-            _ => (),
+        match self.vulcor.as_ref() {
+            Some(instance) => {
+                match event {
+                    WindowEvent::RedrawRequested => instance.render(),
+                    WindowEvent::CloseRequested => {
+                        instance.cleanup();
+                        event_loop.exit()
+                    },
+                    _ => (),
+                }
+            }
+            _ => ()
         }
+
     }
 }
 
 impl Drop for Vulcor {
     fn drop(&mut self) {
-        unsafe { self.cleanup() };
+        self.cleanup();
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut app = Vulcor::new()?;
+    let mut app = App::new();
     let event_loop = EventLoop::new()?;
     event_loop.run_app(&mut app)?;
 

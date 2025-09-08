@@ -4,8 +4,8 @@ use std::{
     os::raw::{c_char, c_void},
 };
 
-const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
-const VALIDATION_LAYERS: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];
+pub const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
+pub const VALIDATION_LAYERS: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];
 
 pub fn validation_layers_supported(entry: &Entry) -> bool {
     let mut found: bool = true;

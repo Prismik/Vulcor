@@ -8,7 +8,7 @@ edition = "2021"
 
 [dependencies]
 log = "0.4"
-ash = "0.38.0"
+ash = { version = "0.38.0", features = ["linked", "debug", "std"] }
 ash-window = "0.13.0"
 tobj = "4.0.3"
 ahash = "0.8.12"

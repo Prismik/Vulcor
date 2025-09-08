@@ -1,8 +1,5 @@
 use ash::{Entry, Instance, ext::debug_utils, vk};
-use std::{
-    ffi::{CStr, CString},
-    os::raw::{c_char, c_void},
-};
+use std::{ffi::CStr, os::raw::c_void};
 
 pub const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 pub const VALIDATION_LAYERS: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];

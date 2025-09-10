@@ -73,7 +73,7 @@ struct Vulcor {
     presentation_queue: vk::Queue,
     surface: vk::SurfaceKHR,
     surface_loader: surface::Instance,
-    swapchain: swapchain::SwapchainData,
+    swapchain: SwapchainData,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -102,7 +102,7 @@ impl Vulcor {
         let swapchain = swapchain::SwapchainData::new(&entry, &instance, &devices.logical, &devices.physical, &surface, &window, &surface_loader)?;
         let render_pass = Self::create_render_pass(&devices.logical, &swapchain.config)?;
         let (pipeline, pipeline_layout) = Self::create_pipeline(&devices.logical, &swapchain.config, &render_pass)?;
-        
+        let framebuffers = Self::create_framebuffers(&devices, &swapchain, &render_pass)?;
         Ok(Self{
             name: title.to_string(),  
             window,
@@ -118,10 +118,26 @@ impl Vulcor {
             render_pass,
             pipeline_layout,
             pipeline,
-            framebuffers: vec![]
+            framebuffers
         })
     }
 
+    fn create_framebuffers(devices: &Devices, swapchain: &SwapchainData, render_pass: &vk::RenderPass) -> Result<Vec<vk::Framebuffer>, Box<dyn Error>> {
+        let framebuffers = swapchain.image_views.iter()
+            .map(|img| {
+                let attachments = &[*img];
+                let create_info = vk::FramebufferCreateInfo::default()
+                    .render_pass(*render_pass)
+                    .attachments(attachments)
+                    .width(swapchain.config.extent.width)
+                    .height(swapchain.config.extent.height)
+                    .layers(1);
+                unsafe { devices.logical.create_framebuffer(&create_info, None).unwrap() }
+            })
+            .collect::<Vec<_>>();
+
+        Ok(framebuffers)
+    }
 
     fn create_render_pass(logical_device: &Device, swapchain: &SwapchainConfig) -> Result<vk::RenderPass, Box<dyn Error>> {
         let color_attachment = vk::AttachmentDescription::default()
@@ -316,16 +332,17 @@ impl Vulcor {
 
     fn cleanup(&self) {
         //unsafe { self.logical_device.device_wait_idle() };
-        unsafe { 
+        unsafe {
+            self.framebuffers.iter()
+                .for_each(|f| self.devices.logical.destroy_framebuffer(*f, None));
             self.devices.logical.destroy_pipeline(self.pipeline, None);
-            self.devices.logical.destroy_render_pass(self.render_pass, None);
             self.devices.logical.destroy_pipeline_layout(self.pipeline_layout, None);
-            self.swapchain.image_views
-                .iter()
+            self.devices.logical.destroy_render_pass(self.render_pass, None);
+            self.swapchain.image_views.iter()
                 .for_each(|v| self.devices.logical.destroy_image_view(*v, None));
+            self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
             self.devices.logical.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
-            self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {
                 report.destroy_debug_utils_messenger(*callback, None);
             }

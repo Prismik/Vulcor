@@ -1,5 +1,6 @@
 mod debug;
 mod swapchain;
+mod devices;
 
 use ash::{ext::debug_utils, khr::{surface}, vk::{self, ImageView, SwapchainKHR}, Device, Entry, Instance};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -12,24 +13,7 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop}, window::{Window, WindowId}
 };
 
-use crate::swapchain::{SwapchainConfig, SwapchainData, SwapchainSupport};
-
-#[derive(Debug)]
-enum PhysicalDeviceError {
-    NoSuitableDevice,
-    NoSuitableQueueFamily
-}
-
-impl Display for PhysicalDeviceError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Self::NoSuitableDevice => write!(f, "No suitable physical devices found."),
-            Self::NoSuitableQueueFamily => write!(f, "No suitable queue family found on the device."),
-        }
-    }
-}
-
-impl std::error::Error for PhysicalDeviceError {}
+use crate::{devices::{Devices, PhysicalDeviceError}, swapchain::{SwapchainConfig, SwapchainData, SwapchainSupport}};
 
 struct QueueFamilyIndices {
     graphics: u32,
@@ -84,8 +68,7 @@ struct Vulcor {
     entry: Entry,
     instance: Instance,
     messenger: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
-    physical_device: vk::PhysicalDevice,
-    logical_device: Device,
+    devices: Devices,
     graphics_queue: vk::Queue,
     presentation_queue: vk::Queue,
     surface: vk::SurfaceKHR,
@@ -93,7 +76,8 @@ struct Vulcor {
     swapchain: swapchain::SwapchainData,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline
+    pipeline: vk::Pipeline,
+    framebuffers: Vec<vk::Framebuffer>
 }
 
 impl Vulcor {
@@ -111,14 +95,13 @@ impl Vulcor {
             None
         )? };
         let surface_loader = surface::Instance::new(&entry, &instance);
-        let physical_device = Self::select_physical_device(&entry, &instance, &surface, &surface_loader)?;
-        let logical_device = Self::create_logical_device(&physical_device, &entry, &instance, &surface, &surface_loader)?;
-        let queue_family = QueueFamilyIndices::new(&physical_device, &entry, &instance, &surface, &surface_loader)?;
-        let graphics_queue = unsafe { logical_device.get_device_queue(queue_family.graphics, 0) };
-        let presentation_queue = unsafe { logical_device.get_device_queue(queue_family.presentation, 0) };
-        let swapchain = swapchain::SwapchainData::new(&entry, &instance, &logical_device, &physical_device, &surface, &window, &surface_loader)?;
-        let render_pass = Self::create_render_pass(&logical_device, &swapchain.config)?;
-        let (pipeline, pipeline_layout) = Self::create_pipeline(&logical_device, &swapchain.config, &render_pass)?;
+        let devices = devices::Devices::new(&entry, &instance, &surface, &surface_loader)?;
+        let queue_family = QueueFamilyIndices::new(&devices.physical, &entry, &instance, &surface, &surface_loader)?;
+        let graphics_queue = unsafe { devices.logical.get_device_queue(queue_family.graphics, 0) };
+        let presentation_queue = unsafe { devices.logical.get_device_queue(queue_family.presentation, 0) };
+        let swapchain = swapchain::SwapchainData::new(&entry, &instance, &devices.logical, &devices.physical, &surface, &window, &surface_loader)?;
+        let render_pass = Self::create_render_pass(&devices.logical, &swapchain.config)?;
+        let (pipeline, pipeline_layout) = Self::create_pipeline(&devices.logical, &swapchain.config, &render_pass)?;
         
         Ok(Self{
             name: title.to_string(),  
@@ -126,8 +109,7 @@ impl Vulcor {
             entry,
             instance,
             messenger,
-            physical_device,
-            logical_device,
+            devices,
             graphics_queue,
             presentation_queue,
             surface,
@@ -135,90 +117,11 @@ impl Vulcor {
             swapchain,
             render_pass,
             pipeline_layout,
-            pipeline
+            pipeline,
+            framebuffers: vec![]
         })
     }
 
-    fn select_physical_device(entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<vk::PhysicalDevice, Box<dyn Error>> {
-        let devices = unsafe { instance.enumerate_physical_devices()? };
-        let mut candidates: BTreeMap<i32, vk::PhysicalDevice> = BTreeMap::new();
-
-        for physical_device in devices {
-            let swapchain_support = SwapchainSupport::new(entry, instance, &physical_device, surface)?;
-            let score = Self::device_suitability_score(&physical_device, entry, instance, surface, surface_loader, &swapchain_support);
-            let properties = unsafe { instance.get_physical_device_properties(physical_device) };
-            let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
-            println!("Physical device [{}] => {}", name.to_string_lossy(), score.to_string());
-            candidates.insert(score, physical_device);
-        }
-
-        if let Some((&score, &physical_device)) = candidates.first_key_value() {
-            if score > 0 {
-                Ok(physical_device)
-            } else {
-                Err(Box::new(PhysicalDeviceError::NoSuitableDevice))
-            }
-        } else {
-            Err(Box::new(PhysicalDeviceError::NoSuitableDevice))
-        }
-    }
-
-    fn create_logical_device(physical_device: &vk::PhysicalDevice, entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<Device, Box<dyn Error>> {
-        let queue_family = QueueFamilyIndices::new(physical_device, entry, instance, surface, surface_loader)?;
-        let queue_priority = &[1.0];
-        let queue_create_infos = queue_family.unique_values().iter().map(|family_index|
-            vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(*family_index)
-                .queue_priorities(queue_priority)
-        ).collect::<Vec<_>>();
-
-        let features = vk::PhysicalDeviceFeatures::default();
-        let extensions = Self::required_extensions().into_iter().map(|e| e.as_ptr()).collect::<Vec<_>>();
-        let device_create_info: vk::DeviceCreateInfo<'_> = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queue_create_infos)
-            .enabled_features(&features)
-            .enabled_extension_names(&extensions);
-
-        let device = unsafe { instance.create_device(*physical_device, &device_create_info, None)? };
-        Ok(device)
-    }
-
-    /// Assigns an increasing score based on the available features, or 0 when geometry shaders are not supported.
-    fn device_suitability_score(physical_device: &vk::PhysicalDevice, entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance, swapchain: &SwapchainSupport) -> i32 {
-        let queue_family = QueueFamilyIndices::new(physical_device, entry, instance, surface, surface_loader);
-        if queue_family.is_err() { return 0; }
-        if !Self::device_supports_extensions(physical_device, instance) { return 0; }
-    
-        if swapchain.formats.is_empty() || swapchain.present_modes.is_empty() { return 0; }
-    
-        let properties = unsafe { instance.get_physical_device_properties(*physical_device) };
-        let features = unsafe { instance.get_physical_device_features(*physical_device) };
-        let mut score: i32 = 0;
-        if features.geometry_shader == vk::FALSE { score += 2000; }
-        if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU { score += 1000; }
-
-        score += properties.limits.max_image_dimension2_d as i32;
-        return score;
-    }
-
-    fn device_supports_extensions(physical_device: &vk::PhysicalDevice, instance: &Instance) -> bool {
-        let required: HashSet<&CStr> = Self::required_extensions().iter().map(|x| *x).collect::<HashSet<_>>();
-        let properties = unsafe { instance.enumerate_device_extension_properties(*physical_device).unwrap() };
-        let available = properties.iter()
-            .map(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) })
-            .collect::<HashSet<_>>();
-
-        return required.intersection(&available).collect::<HashSet<_>>().len() == required.len();
-    }
-
-    fn required_extensions() -> Vec<&'static CStr> {
-        let mut extensions = vec![ash::khr::swapchain::NAME];
-        // Required by Vulkan SDK on macOS since 1.3.216.
-        if cfg!(any(target_os = "macos", target_os = "ios")) {
-            extensions.push(ash::khr::portability_subset::NAME);
-        }
-        return extensions
-    }
 
     fn create_render_pass(logical_device: &Device, swapchain: &SwapchainConfig) -> Result<vk::RenderPass, Box<dyn Error>> {
         let color_attachment = vk::AttachmentDescription::default()
@@ -414,13 +317,13 @@ impl Vulcor {
     fn cleanup(&self) {
         //unsafe { self.logical_device.device_wait_idle() };
         unsafe { 
-            self.logical_device.destroy_pipeline(self.pipeline, None);
-            self.logical_device.destroy_render_pass(self.render_pass, None);
-            self.logical_device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.devices.logical.destroy_pipeline(self.pipeline, None);
+            self.devices.logical.destroy_render_pass(self.render_pass, None);
+            self.devices.logical.destroy_pipeline_layout(self.pipeline_layout, None);
             self.swapchain.image_views
                 .iter()
-                .for_each(|v| self.logical_device.destroy_image_view(*v, None));
-            self.logical_device.destroy_device(None);
+                .for_each(|v| self.devices.logical.destroy_image_view(*v, None));
+            self.devices.logical.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {

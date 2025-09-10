@@ -1,4 +1,4 @@
-use std::{env, error::Error, ffi::OsStr, fs, path::{Path, PathBuf}, process::{Command, Output}};
+use std::{env, ffi::OsStr, fs, path::{Path, PathBuf}, process::{Command, Output}};
 
 fn main() {
     compile_shaders();

@@ -1,19 +1,20 @@
 mod debug;
 mod swapchain;
 mod devices;
+mod synchronous;
 
-use ash::{ext::debug_utils, khr::{surface}, vk::{self, ImageView, SwapchainKHR}, Device, Entry, Instance};
+use ash::{ext::debug_utils, khr::{surface}, vk, Device, Entry, Instance};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
-    collections::{BTreeMap, HashSet}, env, error::Error, ffi::{c_char, CStr, CString}, fmt::{self, Display, Formatter}, path::PathBuf, result::Result
+    collections::{HashSet}, env, error::Error, ffi::{c_char, CStr, CString}, path::PathBuf, result::Result
 };
-use log::{debug, info, error, warn, trace};
+use log::{info};
 use winit::{
-    application::ApplicationHandler, event::{Event, WindowEvent}, 
-    event_loop::{ActiveEventLoop, EventLoop}, window::{Window, WindowId}
+    application::ApplicationHandler, event::WindowEvent, 
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowAttributes, WindowId}
 };
 
-use crate::{devices::{Devices, PhysicalDeviceError}, swapchain::{SwapchainConfig, SwapchainData, SwapchainSupport}};
+use crate::{devices::{Devices, PhysicalDeviceError}, swapchain::{SwapchainConfig, SwapchainData}};
 
 struct QueueFamilyIndices {
     graphics: u32,
@@ -77,7 +78,10 @@ struct Vulcor {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
-    framebuffers: Vec<vk::Framebuffer>
+    framebuffers: Vec<vk::Framebuffer>,
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
+    semaphores: synchronous::Semaphores
 }
 
 impl Vulcor {
@@ -103,6 +107,9 @@ impl Vulcor {
         let render_pass = Self::create_render_pass(&devices.logical, &swapchain.config)?;
         let (pipeline, pipeline_layout) = Self::create_pipeline(&devices.logical, &swapchain.config, &render_pass)?;
         let framebuffers = Self::create_framebuffers(&devices, &swapchain, &render_pass)?;
+        let command_pool = Self::create_command_pool(&devices, &queue_family)?;
+        let command_buffers = Self::create_command_buffers(framebuffers.len() as u32, &devices, &command_pool, &render_pass, &pipeline, &framebuffers, &swapchain)?;
+        let semaphores = synchronous::Semaphores::new(&devices)?;
         Ok(Self{
             name: title.to_string(),  
             window,
@@ -118,8 +125,58 @@ impl Vulcor {
             render_pass,
             pipeline_layout,
             pipeline,
-            framebuffers
+            framebuffers,
+            command_pool,
+            command_buffers,
+            semaphores
         })
+    }
+
+    fn create_command_buffers(count: u32, devices: &Devices, command_pool: &vk::CommandPool, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>, Box<dyn Error>> {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(*command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(count);
+
+        let command_buffers = unsafe { devices.logical.allocate_command_buffers(&allocate_info)? };
+        command_buffers.iter()
+            .zip(framebuffers.iter())
+            .for_each(|(command_buffer, framebuffer)| {
+                let inheritance = vk::CommandBufferInheritanceInfo::default();
+                let info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::empty())
+                    .inheritance_info(&inheritance);
+                let _ = unsafe { devices.logical.begin_command_buffer(*command_buffer, &info) };
+                let render_area = vk::Rect2D::default()
+                    .offset(vk::Offset2D::default())
+                    .extent(swapchain.config.extent);
+                let clear_color_value = vk::ClearValue {
+                    color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] }
+                };
+                let clear_values = &[clear_color_value];
+                let begin_info = vk::RenderPassBeginInfo::default()
+                    .render_pass(*render_pass)
+                    .framebuffer(*framebuffer)
+                    .render_area(render_area)
+                    .clear_values(clear_values);
+
+                // Setup commands
+                unsafe { devices.logical.cmd_begin_render_pass(*command_buffer, &begin_info, vk::SubpassContents::INLINE) };
+                unsafe { devices.logical.cmd_bind_pipeline(*command_buffer, vk::PipelineBindPoint::GRAPHICS, *pipeline) };
+                unsafe { devices.logical.cmd_draw(*command_buffer, 3, 1, 0, 0) };
+                unsafe { devices.logical.cmd_end_render_pass(*command_buffer) };
+                let _ = unsafe { devices.logical.end_command_buffer(*command_buffer) };
+            });
+        Ok(command_buffers)
+    }
+
+    fn create_command_pool(devices: &Devices, queue_family: &QueueFamilyIndices) -> Result<vk::CommandPool, Box<dyn Error>> {
+        let create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::empty())
+            .queue_family_index(queue_family.graphics);
+
+        let command_pool = unsafe { devices.logical.create_command_pool(&create_info, None)? };
+        Ok(command_pool)
     }
 
     fn create_framebuffers(devices: &Devices, swapchain: &SwapchainData, render_pass: &vk::RenderPass) -> Result<Vec<vk::Framebuffer>, Box<dyn Error>> {
@@ -153,14 +210,23 @@ impl Vulcor {
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let color_attachments = &[color_attachment_ref];
+        let dependency = vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(color_attachments);
         let attachments = &[color_attachment];
         let supbasses = &[subpass];
+        let dependencies = &[dependency];
         let create_info  = vk::RenderPassCreateInfo::default()
             .attachments(attachments)
-            .subpasses(supbasses);
+            .subpasses(supbasses)
+            .dependencies(dependencies);
         let render_pass = unsafe { logical_device.create_render_pass(&create_info, None)? };
         Ok(render_pass)
     }
@@ -327,12 +393,32 @@ impl Vulcor {
     }
 
     fn render(&self) {
-        
+        let image_index = unsafe { self.swapchain.loader.acquire_next_image(self.swapchain.khr, u64::MAX, self.semaphores.image_available, vk::Fence::null()).unwrap_or((0, false)).0 as usize };
+        let wait_semaphores = &[self.semaphores.image_available];
+        let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let command_buffers = &[self.command_buffers[image_index]];
+        let signal_semaphores = &[self.semaphores.render_completed];
+        let submit_info = vk::SubmitInfo::default()
+            .wait_semaphores(wait_semaphores)
+            .wait_dst_stage_mask(wait_stages)
+            .command_buffers(command_buffers)
+            .signal_semaphores(signal_semaphores);
+
+        let _ = unsafe { self.devices.logical.queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null()) };
+        let swapchains = &[self.swapchain.khr];
+        let image_indices = &[image_index as u32];
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(signal_semaphores)
+            .swapchains(swapchains)
+            .image_indices(image_indices);
+        let _ = unsafe { self.swapchain.loader.queue_present(self.presentation_queue, &present_info) };
     }
 
     fn cleanup(&self) {
-        //unsafe { self.logical_device.device_wait_idle() };
+        let _ = unsafe { self.devices.logical.device_wait_idle() }; 
         unsafe {
+            self.semaphores.cleanup(&self.devices);
+            self.devices.logical.destroy_command_pool(self.command_pool, None);
             self.framebuffers.iter()
                 .for_each(|f| self.devices.logical.destroy_framebuffer(*f, None));
             self.devices.logical.destroy_pipeline(self.pipeline, None);
@@ -340,7 +426,7 @@ impl Vulcor {
             self.devices.logical.destroy_render_pass(self.render_pass, None);
             self.swapchain.image_views.iter()
                 .for_each(|v| self.devices.logical.destroy_image_view(*v, None));
-            self.swapchain.loader.destroy_swapchain(self.swapchain.swapchain, None);
+            self.swapchain.loader.destroy_swapchain(self.swapchain.khr, None);
             self.devices.logical.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {
@@ -354,7 +440,7 @@ impl Vulcor {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match self.vulcor {
-            None => { 
+            None => {
                 let window_attributes = Window::default_attributes().with_title(self.name.as_str());
                 let window = event_loop.create_window(window_attributes).unwrap();
                 self.vulcor = match Vulcor::new(window) {
@@ -366,6 +452,10 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.vulcor.as_ref().unwrap().render();
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         // println!("{event:?}");
         match self.vulcor.as_ref() {
@@ -374,7 +464,7 @@ impl ApplicationHandler for App {
                     WindowEvent::RedrawRequested => instance.render(),
                     WindowEvent::CloseRequested => {
                         instance.cleanup();
-                        event_loop.exit()
+                        event_loop.exit();
                     },
                     _ => (),
                 }
@@ -394,6 +484,7 @@ impl Drop for Vulcor {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new();
     let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut app)?;
 
     Ok(())

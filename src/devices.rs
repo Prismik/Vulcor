@@ -1,5 +1,5 @@
 use std::{collections::{BTreeMap, HashSet}, error::Error, ffi::CStr, fmt::{self, Display, Formatter}};
-use ash::{ext::debug_utils, khr::{surface}, vk::{self, ImageView, SwapchainKHR}, Device, Entry, Instance};
+use ash::{khr::{surface}, vk, Device, Entry, Instance};
 
 use crate::{swapchain::SwapchainSupport, QueueFamilyIndices};
 

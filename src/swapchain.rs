@@ -21,7 +21,7 @@ pub struct SwapchainConfig {
 }
 
 pub struct SwapchainData {
-    pub swapchain: SwapchainKHR,
+    pub khr: SwapchainKHR,
     pub loader: swapchain::Device,
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
@@ -52,7 +52,7 @@ impl SwapchainData {
         let images = unsafe { loader.get_swapchain_images(swapchain)? };
         let image_views = Self::create_image_views(&logical_device, &images, &config.format)?;
         Ok(Self {
-            swapchain,
+            khr: swapchain,
             loader,
             images,
             image_views,

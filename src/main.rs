@@ -3,7 +3,7 @@ mod swapchain;
 mod devices;
 mod synchronous;
 
-use ash::{ext::debug_utils, khr::{surface}, vk, Device, Entry, Instance};
+use ash::{ext::debug_utils, khr::surface, vk::{self, Handle}, Device, Entry, Instance};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     collections::{HashSet}, env, error::Error, ffi::{c_char, CStr, CString}, path::PathBuf, result::Result
@@ -13,7 +13,6 @@ use winit::{
     application::ApplicationHandler, event::WindowEvent, 
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowAttributes, WindowId}
 };
-
 use crate::{devices::{Devices, PhysicalDeviceError}, swapchain::{SwapchainConfig, SwapchainData}};
 
 struct QueueFamilyIndices {
@@ -81,7 +80,8 @@ struct Vulcor {
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
-    semaphores: synchronous::Semaphores
+    sync: synchronous::RenderSync,
+    run: bool
 }
 
 impl Vulcor {
@@ -109,7 +109,7 @@ impl Vulcor {
         let framebuffers = Self::create_framebuffers(&devices, &swapchain, &render_pass)?;
         let command_pool = Self::create_command_pool(&devices, &queue_family)?;
         let command_buffers = Self::create_command_buffers(framebuffers.len() as u32, &devices, &command_pool, &render_pass, &pipeline, &framebuffers, &swapchain)?;
-        let semaphores = synchronous::Semaphores::new(&devices)?;
+        let sync = synchronous::RenderSync::new(&devices, &swapchain)?;
         Ok(Self{
             name: title.to_string(),  
             window,
@@ -128,7 +128,8 @@ impl Vulcor {
             framebuffers,
             command_pool,
             command_buffers,
-            semaphores
+            sync,
+            run: true
         })
     }
 
@@ -392,32 +393,52 @@ impl Vulcor {
         unsafe { Ok(entry.create_instance(&info, None)?) }
     }
 
-    fn render(&self) {
-        let image_index = unsafe { self.swapchain.loader.acquire_next_image(self.swapchain.khr, u64::MAX, self.semaphores.image_available, vk::Fence::null()).unwrap_or((0, false)).0 as usize };
-        let wait_semaphores = &[self.semaphores.image_available];
+    fn render(&mut self) -> Result<(), Box<dyn Error>> {
+        unsafe { self.devices.logical.wait_for_fences(&[self.sync.get_in_flight_fence()], true, u64::MAX)? };
+        let image_index = unsafe { 
+            self.swapchain.loader.acquire_next_image(
+                self.swapchain.khr, 
+                u64::MAX, 
+                self.sync.get_image_available(), 
+                vk::Fence::null()
+            ).unwrap_or((0, false)).0 as usize 
+        };
+        
+        // TODO Possibly encapsulate in sync object 
+        let in_flight = self.sync.images_in_flight[image_index as usize];
+        if !in_flight.is_null() {
+            unsafe { self.devices.logical.wait_for_fences(&[in_flight], true, u64::MAX)? };
+        }
+        self.sync.update_image_in_flight(image_index);
+
+        let wait_semaphores = &[self.sync.get_image_available()];
         let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let command_buffers = &[self.command_buffers[image_index]];
-        let signal_semaphores = &[self.semaphores.render_completed];
+        let signal_semaphores = &[self.sync.get_render_completed()];
         let submit_info = vk::SubmitInfo::default()
             .wait_semaphores(wait_semaphores)
             .wait_dst_stage_mask(wait_stages)
             .command_buffers(command_buffers)
             .signal_semaphores(signal_semaphores);
 
-        let _ = unsafe { self.devices.logical.queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null()) };
+        self.sync.reset_fences(&self.devices)?;
+        let _ = unsafe { self.devices.logical.queue_submit(self.graphics_queue, &[submit_info], self.sync.get_in_flight_fence()) };
         let swapchains = &[self.swapchain.khr];
         let image_indices = &[image_index as u32];
         let present_info = vk::PresentInfoKHR::default()
             .wait_semaphores(signal_semaphores)
             .swapchains(swapchains)
             .image_indices(image_indices);
-        let _ = unsafe { self.swapchain.loader.queue_present(self.presentation_queue, &present_info) };
+        unsafe { self.swapchain.loader.queue_present(self.presentation_queue, &present_info)? };
+        self.sync.increment_frame();
+        Ok(())
     }
 
     fn cleanup(&self) {
-        let _ = unsafe { self.devices.logical.device_wait_idle() }; 
+        println!("Cleaning up resources...");
+        let _ = unsafe { self.devices.logical.device_wait_idle() };
         unsafe {
-            self.semaphores.cleanup(&self.devices);
+            self.sync.cleanup(&self.devices);
             self.devices.logical.destroy_command_pool(self.command_pool, None);
             self.framebuffers.iter()
                 .for_each(|f| self.devices.logical.destroy_framebuffer(*f, None));
@@ -453,16 +474,22 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.vulcor.as_ref().unwrap().render();
+        let app = self.vulcor.as_mut().unwrap();
+        if app.run {
+            app.render();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
-        // println!("{event:?}");
-        match self.vulcor.as_ref() {
+        match self.vulcor.as_mut() {
             Some(instance) => {
                 match event {
-                    WindowEvent::RedrawRequested => instance.render(),
+                    WindowEvent::RedrawRequested => {
+                        let result = instance.render();
+                        if result.is_err() { log::error!("Error occured on a render pass"); }
+                    },
                     WindowEvent::CloseRequested => {
+                        instance.run = false;
                         instance.cleanup();
                         event_loop.exit();
                     },
@@ -472,12 +499,6 @@ impl ApplicationHandler for App {
             _ => ()
         }
 
-    }
-}
-
-impl Drop for Vulcor {
-    fn drop(&mut self) {
-        self.cleanup();
     }
 }
 

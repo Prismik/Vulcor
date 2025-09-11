@@ -1,16 +1,19 @@
 use std::{error::Error, ffi::{c_char, CStr}};
-use ash::{ext::debug_utils, vk, Entry, Instance};
-use raw_window_handle::RawDisplayHandle;
+use ash::{ext::debug_utils, khr::surface, vk, Entry, Instance};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use winit::window::Window;
 
 use crate::core::debug;
 
 pub struct VulkanContext {
     pub entry: Entry,
-    pub instance: Instance
+    pub instance: Instance,
+    pub surface: vk::SurfaceKHR,
+    pub surface_loader: surface::Instance,
 }
 
 impl VulkanContext {
-    pub fn new(named: &CStr, handle: &RawDisplayHandle) -> Result<Self, Box<dyn Error>> {
+    pub fn new(named: &CStr, window: &Window) -> Result<Self, Box<dyn Error>> {
         let entry = Entry::linked();
         let app_info = vk::ApplicationInfo::default()
             .application_name(named)
@@ -19,7 +22,8 @@ impl VulkanContext {
             .engine_version(0)
             .api_version(vk::API_VERSION_1_3);
 
-        let mut extension_names = ash_window::enumerate_required_extensions(*handle)
+        let display_handle = window.display_handle()?.as_raw();
+        let mut extension_names = ash_window::enumerate_required_extensions(display_handle)
             .unwrap()
             .to_vec();
         
@@ -59,6 +63,21 @@ impl VulkanContext {
         }
 
         let instance = unsafe { entry.create_instance(&info, None)? };
-        Ok(Self{entry, instance})
+        let surface = unsafe { ash_window::create_surface(
+            &entry, 
+            &instance, 
+            display_handle, 
+            window.window_handle()?.as_raw(), 
+            None
+        )? };
+        let surface_loader = surface::Instance::new(&entry, &instance);
+        Ok(Self{entry, instance, surface, surface_loader})
+    }
+
+    pub fn cleanup(&self) {
+        unsafe {
+            self.surface_loader.destroy_surface(self.surface, None);
+            self.instance.destroy_instance(None);
+        }
     }
 }

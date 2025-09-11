@@ -11,7 +11,8 @@ use std::{
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowAttributes, WindowId}
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, 
+    window::{Window, WindowAttributes, WindowId}
 };
 use crate::{core::context::VulkanContext, devices::{Devices, PhysicalDeviceError}, swapchain::{SwapchainConfig, SwapchainData}};
 
@@ -21,7 +22,7 @@ struct QueueFamilyIndices {
 }
 
 impl QueueFamilyIndices {
-    fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
+    fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Self, Box<dyn Error>> {
         let properties = unsafe { context.instance.get_physical_device_queue_family_properties(*physical_device) };
 
         // TODO Unify both graphics and presentation queues
@@ -32,7 +33,7 @@ impl QueueFamilyIndices {
 
         let mut presentation = None;
         for (index, _) in properties.iter().enumerate() {
-            let supported = unsafe { loader.get_physical_device_surface_support(*physical_device, index as u32, *surface)? };
+            let supported = unsafe { context.surface_loader.get_physical_device_surface_support(*physical_device, index as u32, context.surface)? };
             if supported {
                 presentation = Some(index as u32);
                 break;
@@ -70,8 +71,6 @@ struct Vulcor {
     devices: Devices,
     graphics_queue: vk::Queue,
     presentation_queue: vk::Queue,
-    surface: vk::SurfaceKHR,
-    surface_loader: surface::Instance,
     swapchain: SwapchainData,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
@@ -87,21 +86,13 @@ impl Vulcor {
     fn new(window: Window) -> Result<Self, Box<dyn Error>> {
         info!("Creating application");
         let title = "Vulcor";
-        let context = VulkanContext::new(CString::new(title)?.as_c_str(), &window.display_handle()?.as_raw())?;
+        let context = VulkanContext::new(CString::new(title)?.as_c_str(), &window)?;
         let messenger = core::debug::setup_debug_messenger(&context);
-        let surface = unsafe { ash_window::create_surface(
-            &context.entry, 
-            &context.instance, 
-            window.display_handle()?.as_raw(), 
-            window.window_handle()?.as_raw(), 
-            None
-        )? };
-        let surface_loader = surface::Instance::new(&context.entry, &context.instance);
-        let devices = devices::Devices::new(&context, &surface, &surface_loader)?;
-        let queue_family = QueueFamilyIndices::new(&context, &devices.physical, &surface, &surface_loader)?;
+        let devices = devices::Devices::new(&context)?;
+        let queue_family = QueueFamilyIndices::new(&context, &devices.physical)?;
         let graphics_queue = unsafe { devices.logical.get_device_queue(queue_family.graphics, 0) };
         let presentation_queue = unsafe { devices.logical.get_device_queue(queue_family.presentation, 0) };
-        let swapchain = swapchain::SwapchainData::new(&context, &devices.logical, &devices.physical, &surface, &window, &surface_loader)?;
+        let swapchain = swapchain::SwapchainData::new(&context, &devices.logical, &devices.physical, &window)?;
         let render_pass = Self::create_render_pass(&devices.logical, &swapchain.config)?;
         let (pipeline, pipeline_layout) = Self::create_pipeline(&devices.logical, &swapchain.config, &render_pass)?;
         let framebuffers = Self::create_framebuffers(&devices, &swapchain, &render_pass)?;
@@ -116,8 +107,6 @@ impl Vulcor {
             devices,
             graphics_queue,
             presentation_queue,
-            surface,
-            surface_loader,
             swapchain,
             render_pass,
             pipeline_layout,
@@ -339,57 +328,6 @@ impl Vulcor {
         Ok(module)
     }
 
-    fn create_instance(named: &CStr, entry: &Entry, window: &Window) -> Result<Instance, Box<dyn Error>> {
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(named)
-            .application_version(0)
-            .engine_name(named)
-            .engine_version(0)
-            .api_version(vk::API_VERSION_1_3);
-
-        let handle = window.display_handle()?.as_raw();
-        let mut extension_names = ash_window::enumerate_required_extensions(handle)
-            .unwrap()
-            .to_vec();
-        
-        extension_names.push(debug_utils::NAME.as_ptr());
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        {
-            extension_names.push(ash::khr::portability_enumeration::NAME.as_ptr());
-            // Enabling this extension is a requirement when using `VK_KHR_portability_subset`
-            extension_names.push(ash::khr::get_physical_device_properties2::NAME.as_ptr());
-        }
-
-        let flags = if cfg!(any(target_os = "macos", target_os = "ios")) {
-            vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
-        } else {
-            vk::InstanceCreateFlags::default()
-        };
-
-        let mut info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            //.enabled_layer_names(&enabled_layer_names)
-            .enabled_extension_names(&extension_names)
-            .flags(flags);
-
-        let layers_names_raw: Vec<*const c_char> = core::debug::VALIDATION_LAYERS
-            .iter()
-            .map(|raw_name| raw_name.as_ptr())
-            .collect();
-
-        let mut debug_info = core::debug::create_debug_info();
-        if core::debug::VALIDATION_ENABLED {
-            if core::debug::validation_layers_supported(entry) {
-                info = info.enabled_layer_names(&layers_names_raw)
-                    .push_next(&mut debug_info);
-            } else {
-                panic!("Validation layers not supported")
-            }
-        }
-
-        unsafe { Ok(entry.create_instance(&info, None)?) }
-    }
-
     fn render(&mut self) -> Result<(), Box<dyn Error>> {
         unsafe { self.devices.logical.wait_for_fences(&[self.sync.get_in_flight_fence()], true, u64::MAX)? };
         let image_index = unsafe { 
@@ -442,15 +380,12 @@ impl Vulcor {
             self.devices.logical.destroy_pipeline(self.pipeline, None);
             self.devices.logical.destroy_pipeline_layout(self.pipeline_layout, None);
             self.devices.logical.destroy_render_pass(self.render_pass, None);
-            self.swapchain.image_views.iter()
-                .for_each(|v| self.devices.logical.destroy_image_view(*v, None));
-            self.swapchain.loader.destroy_swapchain(self.swapchain.khr, None);
+            self.swapchain.cleanup(&self.devices);
             self.devices.logical.destroy_device(None);
-            self.surface_loader.destroy_surface(self.surface, None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {
                 report.destroy_debug_utils_messenger(*callback, None);
             }
-            self.context.instance.destroy_instance(None);
+            self.context.cleanup();
         }
     }
 }

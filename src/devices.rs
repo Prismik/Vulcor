@@ -26,19 +26,19 @@ pub struct Devices {
 }
 
 impl Devices {
-    pub fn new(context: &VulkanContext, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
-        let physical_device = Self::select_physical_device(&context, &surface, &surface_loader)?;
-        let logical_device = Self::create_logical_device(context, &physical_device, &surface, &surface_loader)?;
+    pub fn new(context: &VulkanContext) -> Result<Self, Box<dyn Error>> {
+        let physical_device = Self::select_physical_device(&context)?;
+        let logical_device = Self::create_logical_device(context, &physical_device)?;
         Ok(Self { physical: physical_device, logical: logical_device })
     }
 
-    fn select_physical_device(context: &VulkanContext, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<vk::PhysicalDevice, Box<dyn Error>> {
+    fn select_physical_device(context: &VulkanContext) -> Result<vk::PhysicalDevice, Box<dyn Error>> {
         let devices = unsafe { context.instance.enumerate_physical_devices()? };
         let mut candidates: BTreeMap<i32, vk::PhysicalDevice> = BTreeMap::new();
 
         for physical_device in devices {
-            let swapchain_support = SwapchainSupport::new(context, &physical_device, surface)?;
-            let score = Self::device_suitability_score(context, &physical_device, surface, surface_loader, &swapchain_support);
+            let swapchain_support = SwapchainSupport::new(context, &physical_device)?;
+            let score = Self::device_suitability_score(context, &physical_device, &swapchain_support);
             let properties = unsafe { context.instance.get_physical_device_properties(physical_device) };
             let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
             println!("Physical device [{}] => {}", name.to_string_lossy(), score.to_string());
@@ -56,8 +56,8 @@ impl Devices {
         }
     }
 
-    fn create_logical_device(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<Device, Box<dyn Error>> {
-        let queue_family = QueueFamilyIndices::new(context, physical_device, surface, surface_loader)?;
+    fn create_logical_device(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Device, Box<dyn Error>> {
+        let queue_family = QueueFamilyIndices::new(context, physical_device)?;
         let queue_priority = &[1.0];
         let queue_create_infos = queue_family.unique_values().iter().map(|family_index|
             vk::DeviceQueueCreateInfo::default()
@@ -77,8 +77,8 @@ impl Devices {
     }
 
     /// Assigns an increasing score based on the available features, or 0 when geometry shaders are not supported.
-    fn device_suitability_score(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance, swapchain: &SwapchainSupport) -> i32 {
-        let queue_family = QueueFamilyIndices::new(context, physical_device, surface, surface_loader);
+    fn device_suitability_score(context: &VulkanContext, physical_device: &vk::PhysicalDevice, swapchain: &SwapchainSupport) -> i32 {
+        let queue_family = QueueFamilyIndices::new(context, physical_device);
         if queue_family.is_err() { return 0; }
         if !Self::device_supports_extensions(&context, physical_device) { return 0; }
     

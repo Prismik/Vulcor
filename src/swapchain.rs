@@ -2,7 +2,7 @@ use std::error::Error;
 use ash::{khr::{surface, swapchain}, vk::{self, Extent2D, SwapchainKHR}, Device, Entry, Instance};
 use winit::window::Window;
 
-use crate::{core::context::VulkanContext, QueueFamilyIndices};
+use crate::{core::context::VulkanContext, devices::Devices, QueueFamilyIndices};
 
 #[derive(Clone, Debug)]
 pub struct SwapchainSupport {
@@ -29,11 +29,10 @@ pub struct SwapchainData {
 }
 
 impl SwapchainSupport {
-    pub fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR) -> Result<Self, Box<dyn Error>> {
-        let surface_loader = surface::Instance::new(&context.entry, &context.instance);
-        let capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(*physical_device, *surface)? };
-        let formats = unsafe { surface_loader.get_physical_device_surface_formats(*physical_device, *surface)? };
-        let present_modes = unsafe { surface_loader.get_physical_device_surface_present_modes(*physical_device, *surface)? };
+    pub fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Self, Box<dyn Error>> {
+        let capabilities = unsafe { context.surface_loader.get_physical_device_surface_capabilities(*physical_device, context.surface)? };
+        let formats = unsafe { context.surface_loader.get_physical_device_surface_formats(*physical_device, context.surface)? };
+        let present_modes = unsafe { context.surface_loader.get_physical_device_surface_present_modes(*physical_device, context.surface)? };
 
         Ok(Self {
             capabilities,
@@ -46,9 +45,9 @@ impl SwapchainSupport {
 }
 
 impl SwapchainData {
-    pub fn new(context: &VulkanContext, logical_device: &Device, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, window: &Window, surface_loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
+    pub fn new(context: &VulkanContext, logical_device: &Device, physical_device: &vk::PhysicalDevice, window: &Window) -> Result<Self, Box<dyn Error>> {
         let loader = swapchain::Device::new(&context.instance, &logical_device);
-        let (swapchain, config) = Self::create_swapchain(&context, &physical_device, &surface, &window, &surface_loader, &loader)?;
+        let (swapchain, config) = Self::create_swapchain(&context, &physical_device, &window, &loader)?;
         let images = unsafe { loader.get_swapchain_images(swapchain)? };
         let image_views = Self::create_image_views(&logical_device, &images, &config.format)?;
         Ok(Self {
@@ -60,9 +59,17 @@ impl SwapchainData {
         })
     }
 
-    fn create_swapchain(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, window: &Window, surface_loader: &surface::Instance, swapchain_loader: &swapchain::Device) -> Result<(vk::SwapchainKHR, SwapchainConfig), Box<dyn Error>> {
-        let queue_family = QueueFamilyIndices::new(context, physical_device, surface, surface_loader)?;
-        let details = SwapchainSupport::new(context, physical_device, surface)?;
+    pub fn cleanup(&self, devices: &Devices) {
+        unsafe {
+            self.image_views.iter()
+                .for_each(|v| devices.logical.destroy_image_view(*v, None));
+            self.loader.destroy_swapchain(self.khr, None);
+        }
+    }
+
+    fn create_swapchain(context: &VulkanContext, physical_device: &vk::PhysicalDevice, window: &Window, swapchain_loader: &swapchain::Device) -> Result<(vk::SwapchainKHR, SwapchainConfig), Box<dyn Error>> {
+        let queue_family = QueueFamilyIndices::new(context, physical_device)?;
+        let details = SwapchainSupport::new(context, physical_device)?;
         let format = Self::select_swapchain_formats(&details);
         let present_mode = Self::select_swapchain_present_mode(&details);
         let extent = Self::select_swapchain_extent(&details, window);
@@ -76,7 +83,7 @@ impl SwapchainData {
         let image_sharing_mode = if use_concurrent_mode { vk::SharingMode::CONCURRENT } else { vk::SharingMode::EXCLUSIVE };
         let queue_family_indices = if use_concurrent_mode { vec![queue_family.graphics, queue_family.presentation] } else { vec![] };
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(*surface)
+            .surface(context.surface)
             .min_image_count(image_count)
             .image_color_space(format.color_space)
             .image_format(format.format)

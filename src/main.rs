@@ -1,7 +1,7 @@
-mod debug;
 mod swapchain;
 mod devices;
 mod synchronous;
+mod core;
 
 use ash::{ext::debug_utils, khr::surface, vk::{self, Handle}, Device, Entry, Instance};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -13,7 +13,7 @@ use winit::{
     application::ApplicationHandler, event::WindowEvent, 
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowAttributes, WindowId}
 };
-use crate::{devices::{Devices, PhysicalDeviceError}, swapchain::{SwapchainConfig, SwapchainData}};
+use crate::{core::context::VulkanContext, devices::{Devices, PhysicalDeviceError}, swapchain::{SwapchainConfig, SwapchainData}};
 
 struct QueueFamilyIndices {
     graphics: u32,
@@ -21,8 +21,8 @@ struct QueueFamilyIndices {
 }
 
 impl QueueFamilyIndices {
-    fn new(physical_device: &vk::PhysicalDevice, entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
-        let properties = unsafe { instance.get_physical_device_queue_family_properties(*physical_device) };
+    fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
+        let properties = unsafe { context.instance.get_physical_device_queue_family_properties(*physical_device) };
 
         // TODO Unify both graphics and presentation queues
         let graphics = properties
@@ -65,8 +65,7 @@ impl App {
 struct Vulcor {
     name: String,
     window: Window,
-    entry: Entry,
-    instance: Instance,
+    context: VulkanContext,
     messenger: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     devices: Devices,
     graphics_queue: vk::Queue,
@@ -88,22 +87,21 @@ impl Vulcor {
     fn new(window: Window) -> Result<Self, Box<dyn Error>> {
         info!("Creating application");
         let title = "Vulcor";
-        let entry = Entry::linked();
-        let instance = Self::create_instance(CString::new(title)?.as_c_str(), &entry, &window)?;
-        let messenger = debug::setup_debug_messenger(&entry, &instance);
+        let context = VulkanContext::new(CString::new(title)?.as_c_str(), &window.display_handle()?.as_raw())?;
+        let messenger = core::debug::setup_debug_messenger(&context);
         let surface = unsafe { ash_window::create_surface(
-            &entry, 
-            &instance, 
+            &context.entry, 
+            &context.instance, 
             window.display_handle()?.as_raw(), 
             window.window_handle()?.as_raw(), 
             None
         )? };
-        let surface_loader = surface::Instance::new(&entry, &instance);
-        let devices = devices::Devices::new(&entry, &instance, &surface, &surface_loader)?;
-        let queue_family = QueueFamilyIndices::new(&devices.physical, &entry, &instance, &surface, &surface_loader)?;
+        let surface_loader = surface::Instance::new(&context.entry, &context.instance);
+        let devices = devices::Devices::new(&context, &surface, &surface_loader)?;
+        let queue_family = QueueFamilyIndices::new(&context, &devices.physical, &surface, &surface_loader)?;
         let graphics_queue = unsafe { devices.logical.get_device_queue(queue_family.graphics, 0) };
         let presentation_queue = unsafe { devices.logical.get_device_queue(queue_family.presentation, 0) };
-        let swapchain = swapchain::SwapchainData::new(&entry, &instance, &devices.logical, &devices.physical, &surface, &window, &surface_loader)?;
+        let swapchain = swapchain::SwapchainData::new(&context, &devices.logical, &devices.physical, &surface, &window, &surface_loader)?;
         let render_pass = Self::create_render_pass(&devices.logical, &swapchain.config)?;
         let (pipeline, pipeline_layout) = Self::create_pipeline(&devices.logical, &swapchain.config, &render_pass)?;
         let framebuffers = Self::create_framebuffers(&devices, &swapchain, &render_pass)?;
@@ -113,8 +111,7 @@ impl Vulcor {
         Ok(Self{
             name: title.to_string(),  
             window,
-            entry,
-            instance,
+            context,
             messenger,
             devices,
             graphics_queue,
@@ -375,14 +372,14 @@ impl Vulcor {
             .enabled_extension_names(&extension_names)
             .flags(flags);
 
-        let layers_names_raw: Vec<*const c_char> = debug::VALIDATION_LAYERS
+        let layers_names_raw: Vec<*const c_char> = core::debug::VALIDATION_LAYERS
             .iter()
             .map(|raw_name| raw_name.as_ptr())
             .collect();
 
-        let mut debug_info = debug::create_debug_info();
-        if debug::VALIDATION_ENABLED {
-            if debug::validation_layers_supported(entry) {
+        let mut debug_info = core::debug::create_debug_info();
+        if core::debug::VALIDATION_ENABLED {
+            if core::debug::validation_layers_supported(entry) {
                 info = info.enabled_layer_names(&layers_names_raw)
                     .push_next(&mut debug_info);
             } else {
@@ -453,7 +450,7 @@ impl Vulcor {
             if let Some((report, callback)) = self.messenger.as_ref().take() {
                 report.destroy_debug_utils_messenger(*callback, None);
             }
-            self.instance.destroy_instance(None);
+            self.context.instance.destroy_instance(None);
         }
     }
 }

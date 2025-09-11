@@ -1,7 +1,7 @@
 use std::{collections::{BTreeMap, HashSet}, error::Error, ffi::CStr, fmt::{self, Display, Formatter}};
 use ash::{khr::{surface}, vk, Device, Entry, Instance};
 
-use crate::{swapchain::SwapchainSupport, QueueFamilyIndices};
+use crate::{core::context::VulkanContext, swapchain::SwapchainSupport, QueueFamilyIndices};
 
 #[derive(Debug)]
 pub enum PhysicalDeviceError {
@@ -26,20 +26,20 @@ pub struct Devices {
 }
 
 impl Devices {
-    pub fn new(entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
-        let physical_device = Self::select_physical_device(&entry, &instance, &surface, &surface_loader)?;
-        let logical_device = Self::create_logical_device(&physical_device, &entry, &instance, &surface, &surface_loader)?;
+    pub fn new(context: &VulkanContext, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
+        let physical_device = Self::select_physical_device(&context, &surface, &surface_loader)?;
+        let logical_device = Self::create_logical_device(context, &physical_device, &surface, &surface_loader)?;
         Ok(Self { physical: physical_device, logical: logical_device })
     }
 
-    fn select_physical_device(entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<vk::PhysicalDevice, Box<dyn Error>> {
-        let devices = unsafe { instance.enumerate_physical_devices()? };
+    fn select_physical_device(context: &VulkanContext, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<vk::PhysicalDevice, Box<dyn Error>> {
+        let devices = unsafe { context.instance.enumerate_physical_devices()? };
         let mut candidates: BTreeMap<i32, vk::PhysicalDevice> = BTreeMap::new();
 
         for physical_device in devices {
-            let swapchain_support = SwapchainSupport::new(entry, instance, &physical_device, surface)?;
-            let score = Self::device_suitability_score(&physical_device, entry, instance, surface, surface_loader, &swapchain_support);
-            let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+            let swapchain_support = SwapchainSupport::new(context, &physical_device, surface)?;
+            let score = Self::device_suitability_score(context, &physical_device, surface, surface_loader, &swapchain_support);
+            let properties = unsafe { context.instance.get_physical_device_properties(physical_device) };
             let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
             println!("Physical device [{}] => {}", name.to_string_lossy(), score.to_string());
             candidates.insert(score, physical_device);
@@ -56,8 +56,8 @@ impl Devices {
         }
     }
 
-    fn create_logical_device(physical_device: &vk::PhysicalDevice, entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<Device, Box<dyn Error>> {
-        let queue_family = QueueFamilyIndices::new(physical_device, entry, instance, surface, surface_loader)?;
+    fn create_logical_device(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance) -> Result<Device, Box<dyn Error>> {
+        let queue_family = QueueFamilyIndices::new(context, physical_device, surface, surface_loader)?;
         let queue_priority = &[1.0];
         let queue_create_infos = queue_family.unique_values().iter().map(|family_index|
             vk::DeviceQueueCreateInfo::default()
@@ -72,20 +72,20 @@ impl Devices {
             .enabled_features(&features)
             .enabled_extension_names(&extensions);
 
-        let device = unsafe { instance.create_device(*physical_device, &device_create_info, None)? };
+        let device = unsafe { context.instance.create_device(*physical_device, &device_create_info, None)? };
         Ok(device)
     }
 
     /// Assigns an increasing score based on the available features, or 0 when geometry shaders are not supported.
-    fn device_suitability_score(physical_device: &vk::PhysicalDevice, entry: &Entry, instance: &Instance, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance, swapchain: &SwapchainSupport) -> i32 {
-        let queue_family = QueueFamilyIndices::new(physical_device, entry, instance, surface, surface_loader);
+    fn device_suitability_score(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, surface_loader: &surface::Instance, swapchain: &SwapchainSupport) -> i32 {
+        let queue_family = QueueFamilyIndices::new(context, physical_device, surface, surface_loader);
         if queue_family.is_err() { return 0; }
-        if !Self::device_supports_extensions(physical_device, instance) { return 0; }
+        if !Self::device_supports_extensions(&context, physical_device) { return 0; }
     
         if swapchain.formats.is_empty() || swapchain.present_modes.is_empty() { return 0; }
     
-        let properties = unsafe { instance.get_physical_device_properties(*physical_device) };
-        let features = unsafe { instance.get_physical_device_features(*physical_device) };
+        let properties = unsafe { context.instance.get_physical_device_properties(*physical_device) };
+        let features = unsafe { context.instance.get_physical_device_features(*physical_device) };
         let mut score: i32 = 0;
         if features.geometry_shader == vk::FALSE { score += 2000; }
         if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU { score += 1000; }
@@ -94,9 +94,9 @@ impl Devices {
         return score;
     }
 
-    fn device_supports_extensions(physical_device: &vk::PhysicalDevice, instance: &Instance) -> bool {
+    fn device_supports_extensions(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> bool {
         let required: HashSet<&CStr> = Self::required_extensions().iter().map(|x| *x).collect::<HashSet<_>>();
-        let properties = unsafe { instance.enumerate_device_extension_properties(*physical_device).unwrap() };
+        let properties = unsafe { context.instance.enumerate_device_extension_properties(*physical_device).unwrap() };
         let available = properties.iter()
             .map(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) })
             .collect::<HashSet<_>>();

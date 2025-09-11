@@ -1,6 +1,8 @@
 use ash::{Entry, Instance, ext::debug_utils, vk};
 use std::{ffi::CStr, os::raw::c_void};
 
+use crate::core::context::VulkanContext;
+
 pub const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 pub const VALIDATION_LAYERS: [&'static CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];
 
@@ -25,11 +27,11 @@ pub fn validation_layers_supported(entry: &Entry) -> bool {
     return found
 }
 
-pub fn setup_debug_messenger(entry: &Entry, instance: &Instance) -> Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)> {
+pub fn setup_debug_messenger(context: &VulkanContext) -> Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)> {
     if !VALIDATION_ENABLED { return None; }
 
     let create_info = create_debug_info();
-    let debug_utils = debug_utils::Instance::new(entry, instance);
+    let debug_utils = debug_utils::Instance::new(&context.entry, &context.instance);
     let debug_utils_messenger = unsafe {
         debug_utils
             .create_debug_utils_messenger(&create_info, None)

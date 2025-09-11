@@ -2,7 +2,7 @@ use std::error::Error;
 use ash::{khr::{surface, swapchain}, vk::{self, Extent2D, SwapchainKHR}, Device, Entry, Instance};
 use winit::window::Window;
 
-use crate::QueueFamilyIndices;
+use crate::{core::context::VulkanContext, QueueFamilyIndices};
 
 #[derive(Clone, Debug)]
 pub struct SwapchainSupport {
@@ -29,8 +29,8 @@ pub struct SwapchainData {
 }
 
 impl SwapchainSupport {
-    pub fn new(entry: &Entry, instance: &Instance, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR) -> Result<Self, Box<dyn Error>> {
-        let surface_loader = surface::Instance::new(entry, instance);
+    pub fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR) -> Result<Self, Box<dyn Error>> {
+        let surface_loader = surface::Instance::new(&context.entry, &context.instance);
         let capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(*physical_device, *surface)? };
         let formats = unsafe { surface_loader.get_physical_device_surface_formats(*physical_device, *surface)? };
         let present_modes = unsafe { surface_loader.get_physical_device_surface_present_modes(*physical_device, *surface)? };
@@ -46,9 +46,9 @@ impl SwapchainSupport {
 }
 
 impl SwapchainData {
-    pub fn new(entry: &Entry, instance:&Instance, logical_device: &Device, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, window: &Window, surface_loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
-        let loader = swapchain::Device::new(&instance, &logical_device);
-        let (swapchain, config) = Self::create_swapchain(&entry, &instance, &physical_device, &surface, &window, &surface_loader, &loader)?;
+    pub fn new(context: &VulkanContext, logical_device: &Device, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, window: &Window, surface_loader: &surface::Instance) -> Result<Self, Box<dyn Error>> {
+        let loader = swapchain::Device::new(&context.instance, &logical_device);
+        let (swapchain, config) = Self::create_swapchain(&context, &physical_device, &surface, &window, &surface_loader, &loader)?;
         let images = unsafe { loader.get_swapchain_images(swapchain)? };
         let image_views = Self::create_image_views(&logical_device, &images, &config.format)?;
         Ok(Self {
@@ -60,9 +60,9 @@ impl SwapchainData {
         })
     }
 
-    fn create_swapchain(entry: &Entry, instance: &Instance, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, window: &Window, surface_loader: &surface::Instance, swapchain_loader: &swapchain::Device) -> Result<(vk::SwapchainKHR, SwapchainConfig), Box<dyn Error>> {
-        let queue_family = QueueFamilyIndices::new(physical_device, entry, instance, surface, surface_loader)?;
-        let details = SwapchainSupport::new(entry, instance, physical_device, surface)?;
+    fn create_swapchain(context: &VulkanContext, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, window: &Window, surface_loader: &surface::Instance, swapchain_loader: &swapchain::Device) -> Result<(vk::SwapchainKHR, SwapchainConfig), Box<dyn Error>> {
+        let queue_family = QueueFamilyIndices::new(context, physical_device, surface, surface_loader)?;
+        let details = SwapchainSupport::new(context, physical_device, surface)?;
         let format = Self::select_swapchain_formats(&details);
         let present_mode = Self::select_swapchain_present_mode(&details);
         let extent = Self::select_swapchain_extent(&details, window);

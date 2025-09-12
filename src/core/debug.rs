@@ -1,4 +1,4 @@
-use ash::{Entry, Instance, ext::debug_utils, vk};
+use ash::{Entry, ext::debug_utils, vk};
 use std::{ffi::CStr, os::raw::c_void};
 
 use crate::core::context::VulkanContext;

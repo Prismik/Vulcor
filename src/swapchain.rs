@@ -1,8 +1,8 @@
 use std::error::Error;
-use ash::{khr::{surface, swapchain}, vk::{self, Extent2D, SwapchainKHR}, Device, Entry, Instance};
+use ash::{khr::{swapchain}, vk::{self, Extent2D, SwapchainKHR}, Device};
 use winit::window::Window;
 
-use crate::{core::context::VulkanContext, devices::Devices, QueueFamilyIndices};
+use crate::{core::context::VulkanContext, Devices, QueueFamilyIndices};
 
 #[derive(Clone, Debug)]
 pub struct SwapchainSupport {

@@ -1,6 +1,6 @@
 use std::error::Error;
 use ash::vk;
-use crate::{devices::Devices, swapchain::SwapchainData};
+use crate::{Devices, swapchain::SwapchainData};
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 

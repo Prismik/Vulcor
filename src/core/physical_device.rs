@@ -1,7 +1,44 @@
 use std::{collections::{BTreeMap, HashSet}, error::Error, ffi::CStr, fmt::{self, Display, Formatter}};
-use ash::{khr::{surface}, vk, Device, Entry, Instance};
+use ash::vk;
 
-use crate::{core::context::VulkanContext, swapchain::SwapchainSupport, QueueFamilyIndices};
+use crate::{core::context::VulkanContext, swapchain::SwapchainSupport};
+
+
+pub struct QueueFamilyIndices {
+    pub graphics: u32,
+    pub presentation: u32
+}
+
+impl QueueFamilyIndices {
+    pub fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Self, Box<dyn Error>> {
+        let properties = unsafe { context.instance.get_physical_device_queue_family_properties(*physical_device) };
+
+        // TODO Unify both graphics and presentation queues
+        let graphics = properties
+            .iter()
+            .position(|p| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|i| i as u32);
+
+        let mut presentation = None;
+        for (index, _) in properties.iter().enumerate() {
+            let supported = unsafe { context.surface_loader.get_physical_device_surface_support(*physical_device, index as u32, context.surface)? };
+            if supported {
+                presentation = Some(index as u32);
+                break;
+            }
+        }
+        
+        if let (Some(graphics), Some(presentation)) = (graphics, presentation) {
+            Ok(Self { graphics, presentation })
+        } else {
+            Err(Box::new(PhysicalDeviceError::NoSuitableQueueFamily))
+        }
+    }
+
+    pub fn unique_values(&self) -> HashSet<u32> {
+        return HashSet::from([self.graphics, self.presentation]);
+    }
+}
 
 #[derive(Debug)]
 pub enum PhysicalDeviceError {
@@ -20,16 +57,23 @@ impl Display for PhysicalDeviceError {
 
 impl std::error::Error for PhysicalDeviceError {}
 
-pub struct Devices {
-    pub physical: vk::PhysicalDevice,
-    pub logical: Device,
+pub struct GraphicsHardware {
+    pub instance: vk::PhysicalDevice
 }
 
-impl Devices {
+impl GraphicsHardware {
     pub fn new(context: &VulkanContext) -> Result<Self, Box<dyn Error>> {
         let physical_device = Self::select_physical_device(&context)?;
-        let logical_device = Self::create_logical_device(context, &physical_device)?;
-        Ok(Self { physical: physical_device, logical: logical_device })
+        Ok(Self { instance: physical_device })
+    }
+
+    pub fn required_extensions() -> Vec<&'static CStr> {
+        let mut extensions = vec![ash::khr::swapchain::NAME];
+        // Required by Vulkan SDK on macOS since 1.3.216.
+        if cfg!(any(target_os = "macos", target_os = "ios")) {
+            extensions.push(ash::khr::portability_subset::NAME);
+        }
+        return extensions
     }
 
     fn select_physical_device(context: &VulkanContext) -> Result<vk::PhysicalDevice, Box<dyn Error>> {
@@ -56,27 +100,7 @@ impl Devices {
         }
     }
 
-    fn create_logical_device(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Device, Box<dyn Error>> {
-        let queue_family = QueueFamilyIndices::new(context, physical_device)?;
-        let queue_priority = &[1.0];
-        let queue_create_infos = queue_family.unique_values().iter().map(|family_index|
-            vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(*family_index)
-                .queue_priorities(queue_priority)
-        ).collect::<Vec<_>>();
-
-        let features = vk::PhysicalDeviceFeatures::default();
-        let extensions = Self::required_extensions().into_iter().map(|e| e.as_ptr()).collect::<Vec<_>>();
-        let device_create_info: vk::DeviceCreateInfo<'_> = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queue_create_infos)
-            .enabled_features(&features)
-            .enabled_extension_names(&extensions);
-
-        let device = unsafe { context.instance.create_device(*physical_device, &device_create_info, None)? };
-        Ok(device)
-    }
-
-    /// Assigns an increasing score based on the available features, or 0 when geometry shaders are not supported.
+        /// Assigns an increasing score based on the available features, or 0 when geometry shaders are not supported.
     fn device_suitability_score(context: &VulkanContext, physical_device: &vk::PhysicalDevice, swapchain: &SwapchainSupport) -> i32 {
         let queue_family = QueueFamilyIndices::new(context, physical_device);
         if queue_family.is_err() { return 0; }
@@ -102,14 +126,5 @@ impl Devices {
             .collect::<HashSet<_>>();
 
         return required.intersection(&available).collect::<HashSet<_>>().len() == required.len();
-    }
-
-    fn required_extensions() -> Vec<&'static CStr> {
-        let mut extensions = vec![ash::khr::swapchain::NAME];
-        // Required by Vulkan SDK on macOS since 1.3.216.
-        if cfg!(any(target_os = "macos", target_os = "ios")) {
-            extensions.push(ash::khr::portability_subset::NAME);
-        }
-        return extensions
     }
 }

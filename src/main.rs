@@ -4,14 +4,18 @@ mod core;
 mod pipeline;
 
 use ash::{ext::debug_utils, vk::{self, Handle}, Device};
-use std::{env, error::Error, ffi::{CStr, CString}, path::PathBuf, result::Result};
+use std::{error::Error, ffi::{CString}, result::Result};
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, 
     window::{Window, WindowId}
 };
-use crate::{core::{context::VulkanContext, logical_device::Devices, physical_device::QueueFamilyIndices}, pipeline::{render_pipeline::RenderPipeline, traits::VulkanPipeline}, swapchain::{SwapchainConfig, SwapchainData}};
+use crate::{
+    core::{context::VulkanContext, logical_device::Devices, physical_device::QueueFamilyIndices}, 
+    pipeline::{render_pipeline::RenderPipeline, traits::VulkanPipeline}, 
+    swapchain::{SwapchainConfig, SwapchainData}
+};
 
 struct App {
     name: String,

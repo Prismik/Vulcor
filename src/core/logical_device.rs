@@ -1,7 +1,7 @@
-use std::{collections::{BTreeMap, HashSet}, error::Error, ffi::CStr, fmt::{self, Display, Formatter}};
+use std::{error::Error};
 use ash::{vk, Device};
 
-use crate::{core::{context::VulkanContext, physical_device::{self, GraphicsHardware}}, swapchain::SwapchainSupport, QueueFamilyIndices};
+use crate::{core::{context::VulkanContext, physical_device::GraphicsHardware}, QueueFamilyIndices};
 
 pub struct Devices {
     pub physical: vk::PhysicalDevice,

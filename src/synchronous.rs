@@ -1,4 +1,4 @@
-use std::error::Error;
+use anyhow::{Result};
 use ash::vk;
 use crate::{Devices, swapchain::SwapchainData};
 
@@ -13,7 +13,7 @@ pub struct RenderSync {
 }
 
 impl RenderSync {
-    pub fn new(devices: &Devices, swapchain: &SwapchainData) -> Result<Self, Box<dyn Error>> {
+    pub fn new(devices: &Devices, swapchain: &SwapchainData) -> Result<Self> {
         let mut image_available_semaphores: Vec<vk::Semaphore> = vec![];
         let mut render_completed_semaphores: Vec<vk::Semaphore> = vec![];
         let mut in_flight_fences: Vec<vk::Fence> = vec![];
@@ -84,7 +84,7 @@ impl RenderSync {
         self.images_in_flight[index] = self.get_in_flight_fence();
     }
 
-    pub fn reset_fences(&self, devices: &Devices) -> Result<(), Box<dyn Error>> {
+    pub fn reset_fences(&self, devices: &Devices) -> Result<()> {
         unsafe { devices.logical.reset_fences(&[self.get_in_flight_fence()])? };
         Ok(())
     }

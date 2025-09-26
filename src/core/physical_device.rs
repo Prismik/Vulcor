@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use std::{collections::{BTreeMap, HashSet}, error::Error, ffi::CStr, fmt::{self, Display, Formatter}};
 use ash::vk;
 
@@ -10,7 +11,7 @@ pub struct QueueFamilyIndices {
 }
 
 impl QueueFamilyIndices {
-    pub fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Self, Box<dyn Error>> {
+    pub fn new(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Self> {
         let properties = unsafe { context.instance.get_physical_device_queue_family_properties(*physical_device) };
 
         // TODO Unify both graphics and presentation queues
@@ -31,7 +32,7 @@ impl QueueFamilyIndices {
         if let (Some(graphics), Some(presentation)) = (graphics, presentation) {
             Ok(Self { graphics, presentation })
         } else {
-            Err(Box::new(PhysicalDeviceError::NoSuitableQueueFamily))
+            Err(anyhow!(PhysicalDeviceError::NoSuitableQueueFamily))
         }
     }
 

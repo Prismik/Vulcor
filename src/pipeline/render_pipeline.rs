@@ -1,5 +1,5 @@
-use std::{error::Error, ffi::CString};
-
+use anyhow::{anyhow, Result};
+use std::{ffi::CString};
 use ash::{vk, Device};
 
 use crate::{pipeline::{shader::Shader, traits::VulkanPipeline}, swapchain::SwapchainConfig};
@@ -10,7 +10,7 @@ pub struct RenderPipeline {
 }
 
 impl RenderPipeline {
-    fn create_layout(logical_device: &Device) -> Result<vk::PipelineLayout, Box<dyn Error>> {
+    fn create_layout(logical_device: &Device) -> Result<vk::PipelineLayout> {
         let layout_info = vk::PipelineLayoutCreateInfo::default();
         let layout = unsafe { logical_device.create_pipeline_layout(&layout_info, None)? };
         Ok(layout)
@@ -18,7 +18,7 @@ impl RenderPipeline {
 }
 
 impl VulkanPipeline for RenderPipeline {
-    fn new(logical_device: &Device, config: &SwapchainConfig, render_pass: &vk::RenderPass) -> Result<Self, Box<dyn Error>> {
+    fn new(logical_device: &Device, config: &SwapchainConfig, render_pass: &vk::RenderPass) -> Result<Self> {
         let vert = Shader::new("shaders/vert.spv", logical_device)?;
         let frag = Shader::new("shaders/frag.spv", logical_device)?;
         let main = CString::new("main")?;

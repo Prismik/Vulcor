@@ -3,8 +3,9 @@ mod synchronous;
 mod core;
 mod pipeline;
 
+use anyhow::{anyhow, Result};
 use ash::{ext::debug_utils, vk::{self, Handle}, Device};
-use std::{error::Error, ffi::{CString}, result::Result};
+use std::{error::Error, ffi::{CString}};
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
@@ -82,7 +83,17 @@ impl Vulcor {
         })
     }
 
-    fn create_command_buffers(count: u32, devices: &Devices, command_pool: &vk::CommandPool, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>, Box<dyn Error>> {
+    fn recreate_swapchain(&mut self) -> Result<()> {
+        self.swapchain = swapchain::SwapchainData::new(&self.context, &self.devices.logical, &self.devices.physical, &self.window)?;
+        self.render_pass = Self::create_render_pass(&self.devices.logical, &self.swapchain.config)?;
+        self.pipeline = RenderPipeline::new(&self.devices.logical, &self.swapchain.config, &self.render_pass)?;
+        self.framebuffers = Self::create_framebuffers(&self.devices, &self.swapchain, &self.render_pass)?;
+        self.command_buffers = Self::create_command_buffers(self.framebuffers.len() as u32, &self.devices, &self.command_pool, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.swapchain)?;
+        self.sync = synchronous::RenderSync::new(&self.devices, &self.swapchain)?;
+        Ok(())
+    }
+
+    fn create_command_buffers(count: u32, devices: &Devices, command_pool: &vk::CommandPool, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>> {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(*command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -120,7 +131,7 @@ impl Vulcor {
         Ok(command_buffers)
     }
 
-    fn create_command_pool(devices: &Devices, queue_family: &QueueFamilyIndices) -> Result<vk::CommandPool, Box<dyn Error>> {
+    fn create_command_pool(devices: &Devices, queue_family: &QueueFamilyIndices) -> Result<vk::CommandPool> {
         let create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::empty())
             .queue_family_index(queue_family.graphics);
@@ -129,7 +140,7 @@ impl Vulcor {
         Ok(command_pool)
     }
 
-    fn create_framebuffers(devices: &Devices, swapchain: &SwapchainData, render_pass: &vk::RenderPass) -> Result<Vec<vk::Framebuffer>, Box<dyn Error>> {
+    fn create_framebuffers(devices: &Devices, swapchain: &SwapchainData, render_pass: &vk::RenderPass) -> Result<Vec<vk::Framebuffer>> {
         let framebuffers = swapchain.image_views.iter()
             .map(|img| {
                 let attachments = &[*img];
@@ -146,7 +157,7 @@ impl Vulcor {
         Ok(framebuffers)
     }
 
-    fn create_render_pass(logical_device: &Device, swapchain: &SwapchainConfig) -> Result<vk::RenderPass, Box<dyn Error>> {
+    fn create_render_pass(logical_device: &Device, swapchain: &SwapchainConfig) -> Result<vk::RenderPass> {
         let color_attachment = vk::AttachmentDescription::default()
             .format(swapchain.format.format)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -181,15 +192,21 @@ impl Vulcor {
         Ok(render_pass)
     }
 
-    fn render(&mut self) -> Result<(), Box<dyn Error>> {
+    fn render(&mut self) -> Result<()> {
         unsafe { self.devices.logical.wait_for_fences(&[self.sync.get_in_flight_fence()], true, u64::MAX)? };
-        let image_index = unsafe { 
-            self.swapchain.loader.acquire_next_image(
+        
+        let result = unsafe { self.swapchain.loader.acquire_next_image(
                 self.swapchain.khr, 
                 u64::MAX, 
                 self.sync.get_image_available(), 
                 vk::Fence::null()
-            ).unwrap_or((0, false)).0 as usize 
+            )
+        };
+
+        let image_index = match result {
+            Ok((image_index, _)) => image_index as usize,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return self.recreate_swapchain(),
+            Err(e) => return Err(anyhow!(e)),
         };
         
         // TODO Possibly encapsulate in sync object 
@@ -222,22 +239,29 @@ impl Vulcor {
         Ok(())
     }
 
-    fn cleanup(&self) {
+    fn cleanup(&mut self) {
         println!("Cleaning up resources...");
         let _ = unsafe { self.devices.logical.device_wait_idle() };
         unsafe {
             self.sync.cleanup(&self.devices);
+            self.destroy_swapchain();
             self.devices.logical.destroy_command_pool(self.command_pool, None);
-            self.framebuffers.iter()
-                .for_each(|f| self.devices.logical.destroy_framebuffer(*f, None));
-            self.pipeline.cleanup(&self.devices.logical);
-            self.devices.logical.destroy_render_pass(self.render_pass, None);
-            self.swapchain.cleanup(&self.devices);
             self.devices.logical.destroy_device(None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {
                 report.destroy_debug_utils_messenger(*callback, None);
             }
             self.context.cleanup();
+        }
+    }
+
+    fn destroy_swapchain(&mut self) {
+        unsafe {
+            self.framebuffers.iter()
+                .for_each(|f| self.devices.logical.destroy_framebuffer(*f, None));
+            self.devices.logical.free_command_buffers(self.command_pool, &self.command_buffers);
+            self.pipeline.cleanup(&self.devices.logical);
+            self.devices.logical.destroy_render_pass(self.render_pass, None);
+            self.swapchain.cleanup(&self.devices);
         }
     }
 }
@@ -286,7 +310,7 @@ impl ApplicationHandler for App {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<()> {
     let mut app = App::new();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

@@ -20,12 +20,13 @@ use crate::{
 
 struct App {
     name: String,
-    vulcor: Option<Vulcor>
+    vulcor: Option<Vulcor>,
+    minimized: bool
 }
 
 impl App {
     fn new() -> App {
-        Self { name: "Vulcor".to_string(), vulcor: None }
+        Self { name: "Vulcor".to_string(), vulcor: None, minimized: false }
     }
 }
 
@@ -44,7 +45,8 @@ struct Vulcor {
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     sync: synchronous::RenderSync,
-    run: bool
+    run: bool,
+    resized: bool
 }
 
 impl Vulcor {
@@ -79,11 +81,14 @@ impl Vulcor {
             command_pool,
             command_buffers,
             sync,
-            run: true
+            run: true,
+            resized: false
         })
     }
 
     fn recreate_swapchain(&mut self) -> Result<()> {
+        unsafe { self.devices.logical.device_wait_idle()?; }
+        self.destroy_swapchain();
         self.swapchain = swapchain::SwapchainData::new(&self.context, &self.devices.logical, &self.devices.physical, &self.window)?;
         self.render_pass = Self::create_render_pass(&self.devices.logical, &self.swapchain.config)?;
         self.pipeline = RenderPipeline::new(&self.devices.logical, &self.swapchain.config, &self.render_pass)?;
@@ -193,8 +198,7 @@ impl Vulcor {
     }
 
     fn render(&mut self) -> Result<()> {
-        unsafe { self.devices.logical.wait_for_fences(&[self.sync.get_in_flight_fence()], true, u64::MAX)? };
-        
+        unsafe { self.devices.logical.wait_for_fences(&[self.sync.get_in_flight_fence()], true, u64::MAX)? };        
         let result = unsafe { self.swapchain.loader.acquire_next_image(
                 self.swapchain.khr, 
                 u64::MAX, 
@@ -234,7 +238,18 @@ impl Vulcor {
             .wait_semaphores(signal_semaphores)
             .swapchains(swapchains)
             .image_indices(image_indices);
-        unsafe { self.swapchain.loader.queue_present(self.presentation_queue, &present_info)? };
+        let result = unsafe { self.swapchain.loader.queue_present(self.presentation_queue, &present_info) };
+        if self.resized {
+            self.resized = false;
+            self.recreate_swapchain()?;
+        } else {
+            match result {
+                Ok(false) => self.recreate_swapchain()?,
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.recreate_swapchain()?,
+                Err(e) => return Err(anyhow!(e)),
+                _ => {}
+            }
+        }
         self.sync.increment_frame();
         Ok(())
     }
@@ -300,6 +315,12 @@ impl ApplicationHandler for App {
                         instance.run = false;
                         instance.cleanup();
                         event_loop.exit();
+                    },
+                    WindowEvent::Resized(size) => { 
+                        self.minimized = size.width == 0 || size.height == 0;
+                        if !self.minimized {
+                            instance.resized = true; 
+                        }
                     },
                     _ => (),
                 }

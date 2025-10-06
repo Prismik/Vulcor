@@ -2,21 +2,24 @@ mod swapchain;
 mod synchronous;
 mod core;
 mod pipeline;
+mod math;
 
 use anyhow::{anyhow, Result};
 use ash::{ext::debug_utils, vk::{self, Handle}, Device};
-use std::{error::Error, ffi::{CString}};
+use std::{error::Error, ffi::{CString}, mem::size_of, ptr::copy_nonoverlapping as memcpy};
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, 
     window::{Window, WindowId}
 };
+
 use crate::{
     core::{context::VulkanContext, logical_device::Devices, physical_device::QueueFamilyIndices}, 
-    pipeline::{render_pipeline::RenderPipeline, traits::VulkanPipeline}, 
+    pipeline::{render_pipeline::{RenderPipeline, Vertex, VERTICES}, traits::VulkanPipeline}, 
     swapchain::{SwapchainConfig, SwapchainData}
 };
+
 
 struct App {
     name: String,
@@ -42,6 +45,8 @@ struct Vulcor {
     render_pass: vk::RenderPass,
     pipeline: RenderPipeline,
     framebuffers: Vec<vk::Framebuffer>,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_mem: vk::DeviceMemory,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     sync: synchronous::RenderSync,
@@ -64,7 +69,8 @@ impl Vulcor {
         let pipeline = RenderPipeline::new(&devices.logical, &swapchain.config, &render_pass)?;
         let framebuffers = Self::create_framebuffers(&devices, &swapchain, &render_pass)?;
         let command_pool = Self::create_command_pool(&devices, &queue_family)?;
-        let command_buffers = Self::create_command_buffers(framebuffers.len() as u32, &devices, &command_pool, &render_pass, &pipeline.instance(), &framebuffers, &swapchain)?;
+        let (vertex_buffer, vertex_buffer_mem) = unsafe { Self::create_vertex_buffer(&context, &devices)? };
+        let command_buffers = unsafe { Self::create_command_buffers(framebuffers.len() as u32, &devices, &command_pool, &render_pass, &pipeline.instance(), &framebuffers, &vertex_buffer, &swapchain)? };
         let sync = synchronous::RenderSync::new(&devices, &swapchain)?;
         Ok(Self{
             name: title.to_string(),  
@@ -78,6 +84,8 @@ impl Vulcor {
             render_pass,
             pipeline,
             framebuffers,
+            vertex_buffer,
+            vertex_buffer_mem,
             command_pool,
             command_buffers,
             sync,
@@ -93,18 +101,49 @@ impl Vulcor {
         self.render_pass = Self::create_render_pass(&self.devices.logical, &self.swapchain.config)?;
         self.pipeline = RenderPipeline::new(&self.devices.logical, &self.swapchain.config, &self.render_pass)?;
         self.framebuffers = Self::create_framebuffers(&self.devices, &self.swapchain, &self.render_pass)?;
-        self.command_buffers = Self::create_command_buffers(self.framebuffers.len() as u32, &self.devices, &self.command_pool, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.swapchain)?;
+        self.command_buffers = unsafe { Self::create_command_buffers(self.framebuffers.len() as u32, &self.devices, &self.command_pool, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.vertex_buffer, &self.swapchain)? };
         self.sync = synchronous::RenderSync::new(&self.devices, &self.swapchain)?;
         Ok(())
     }
 
-    fn create_command_buffers(count: u32, devices: &Devices, command_pool: &vk::CommandPool, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>> {
+    fn get_memory_type_index(mem: vk::PhysicalDeviceMemoryProperties, props: vk::MemoryPropertyFlags, reqs: vk::MemoryRequirements) -> Result<u32> {
+        (0..mem.memory_type_count)
+            .find(|i| { 
+                let suitable = (reqs.memory_type_bits & (1 << i)) != 0;
+                let mem_type = mem.memory_types[*i as usize];
+                suitable && mem_type.property_flags.contains(props)
+            })
+            .ok_or_else(|| anyhow!("No suitable memory type found."))
+    }
+
+    unsafe fn create_vertex_buffer(context: &VulkanContext, devices: &Devices) -> Result<(vk::Buffer, vk::DeviceMemory)> {
+        let mem = context.instance.get_physical_device_memory_properties(devices.physical);
+        
+        let create_info = vk::BufferCreateInfo::default()
+            .size((size_of::<Vertex>() * VERTICES.len()) as u64)
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let vertex_buffer = devices.logical.create_buffer(&create_info, None)?;
+
+        let reqs = devices.logical.get_buffer_memory_requirements(vertex_buffer);
+        let mem_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(reqs.size)
+            .memory_type_index(Self::get_memory_type_index(mem, vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE, reqs)?);
+        let vertex_buffer_mem = devices.logical.allocate_memory(&mem_info, None)?;
+        devices.logical.bind_buffer_memory(vertex_buffer, vertex_buffer_mem, 0)?;
+        let mem = devices.logical.map_memory(vertex_buffer_mem, 0, create_info.size, vk::MemoryMapFlags::empty())?;
+        memcpy(VERTICES.as_ptr(), mem.cast(), VERTICES.len());
+        devices.logical.unmap_memory(vertex_buffer_mem);
+        Ok((vertex_buffer, vertex_buffer_mem))
+    }
+
+    unsafe fn create_command_buffers(count: u32, devices: &Devices, command_pool: &vk::CommandPool, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, vertex_buffer: &vk::Buffer, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>> {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(*command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(count);
 
-        let command_buffers = unsafe { devices.logical.allocate_command_buffers(&allocate_info)? };
+        let command_buffers = devices.logical.allocate_command_buffers(&allocate_info)?;
         command_buffers.iter()
             .zip(framebuffers.iter())
             .for_each(|(command_buffer, framebuffer)| {
@@ -112,7 +151,7 @@ impl Vulcor {
                 let info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::empty())
                     .inheritance_info(&inheritance);
-                let _ = unsafe { devices.logical.begin_command_buffer(*command_buffer, &info) };
+                let _ = devices.logical.begin_command_buffer(*command_buffer, &info);
                 let render_area = vk::Rect2D::default()
                     .offset(vk::Offset2D::default())
                     .extent(swapchain.config.extent);
@@ -127,11 +166,12 @@ impl Vulcor {
                     .clear_values(clear_values);
 
                 // Setup commands
-                unsafe { devices.logical.cmd_begin_render_pass(*command_buffer, &begin_info, vk::SubpassContents::INLINE) };
-                unsafe { devices.logical.cmd_bind_pipeline(*command_buffer, vk::PipelineBindPoint::GRAPHICS, *pipeline) };
-                unsafe { devices.logical.cmd_draw(*command_buffer, 3, 1, 0, 0) };
-                unsafe { devices.logical.cmd_end_render_pass(*command_buffer) };
-                let _ = unsafe { devices.logical.end_command_buffer(*command_buffer) };
+                devices.logical.cmd_begin_render_pass(*command_buffer, &begin_info, vk::SubpassContents::INLINE);
+                devices.logical.cmd_bind_pipeline(*command_buffer, vk::PipelineBindPoint::GRAPHICS, *pipeline);
+                devices.logical.cmd_bind_vertex_buffers(*command_buffer, 0, &[*vertex_buffer], &[0]);
+                devices.logical.cmd_draw(*command_buffer, VERTICES.len() as u32, 1, 0, 0);
+                devices.logical.cmd_end_render_pass(*command_buffer);
+                let _ = devices.logical.end_command_buffer(*command_buffer);
             });
         Ok(command_buffers)
     }
@@ -260,6 +300,8 @@ impl Vulcor {
         unsafe {
             self.sync.cleanup(&self.devices);
             self.destroy_swapchain();
+            self.devices.logical.destroy_buffer(self.vertex_buffer, None);
+            self.devices.logical.free_memory(self.vertex_buffer_mem, None);
             self.devices.logical.destroy_command_pool(self.command_pool, None);
             self.devices.logical.destroy_device(None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {

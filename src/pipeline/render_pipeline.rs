@@ -1,12 +1,60 @@
 use anyhow::{anyhow, Result};
 use std::{ffi::CString};
 use ash::{vk, Device};
+use cgmath::{vec2, vec3};
 
-use crate::{pipeline::{shader::Shader, traits::VulkanPipeline}, swapchain::SwapchainConfig};
+use crate::{
+    math::vector::Vec2, 
+    math::vector::Vec3,
+    pipeline::{shader::Shader, traits::VulkanPipeline}, 
+    swapchain::SwapchainConfig
+};
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct Vertex {
+    pos: Vec2,
+    color: Vec3,
+}
+
+impl Vertex {
+    const fn new(p: Vec2, color: Vec3) -> Self {
+        Self { pos: p, color }
+    }
+
+    fn binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(size_of::<Vertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)
+    }
+
+    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+        let p_desc = vk::VertexInputAttributeDescription::default()
+            .binding(0)
+            .location(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(0);
+
+        let color_desc = vk::VertexInputAttributeDescription::default()
+            .binding(0)
+            .location(1)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(size_of::<Vec2>() as u32);
+
+        [p_desc, color_desc]
+    }
+}
+
+pub static VERTICES: [Vertex; 3] = [
+    Vertex::new(vec2(0.0, -0.5), vec3(1.0, 1.0, 1.0)),
+    Vertex::new(vec2(0.5, 0.5), vec3(0.0, 1.0, 0.0)),
+    Vertex::new(vec2(-0.5, 0.5), vec3(0.0, 0.0, 1.0)),
+];
 
 pub struct RenderPipeline {
-    vkInstance: vk::Pipeline,
-    vkLayout: vk::PipelineLayout
+    vk_instance: vk::Pipeline,
+    vk_layout: vk::PipelineLayout
 }
 
 impl RenderPipeline {
@@ -19,8 +67,8 @@ impl RenderPipeline {
 
 impl VulkanPipeline for RenderPipeline {
     fn new(logical_device: &Device, config: &SwapchainConfig, render_pass: &vk::RenderPass) -> Result<Self> {
-        let vert = Shader::new("shaders/vert.spv", logical_device)?;
-        let frag = Shader::new("shaders/frag.spv", logical_device)?;
+        let vert = Shader::new("shaders/shader.vert.spv", logical_device)?;
+        let frag = Shader::new("shaders/shader.frag.spv", logical_device)?;
         let main = CString::new("main")?;
         let vert_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
@@ -31,7 +79,11 @@ impl VulkanPipeline for RenderPipeline {
             .module(frag.instance)
             .name(main.as_c_str());
 
-        let vert_input_state = vk::PipelineVertexInputStateCreateInfo::default();
+        let binding_descriptions = &[Vertex::binding_description()];
+        let attribute_descriptions = Vertex::attribute_descriptions();
+        let vert_input_state = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(binding_descriptions)
+            .vertex_attribute_descriptions(&attribute_descriptions);
         let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
             .primitive_restart_enable(false);
@@ -106,20 +158,20 @@ impl VulkanPipeline for RenderPipeline {
         unsafe { logical_device.destroy_shader_module(vert.instance, None) };
         unsafe { logical_device.destroy_shader_module(frag.instance, None) };
 
-        Ok(Self{vkInstance: pipeline, vkLayout: layout})
+        Ok(Self{vk_instance: pipeline, vk_layout: layout})
     }
 
     fn instance(&self) -> vk::Pipeline {
-        self.vkInstance
+        self.vk_instance
     }
     
     fn layout(&self) -> vk::PipelineLayout {
-        self.vkLayout
+        self.vk_layout
     }
 
     fn cleanup(&self, logical_device: &Device) {
-        unsafe { logical_device.destroy_pipeline(self.vkInstance, None); }
-        unsafe { logical_device.destroy_pipeline_layout(self.vkLayout, None); }
+        unsafe { logical_device.destroy_pipeline(self.vk_instance, None); }
+        unsafe { logical_device.destroy_pipeline_layout(self.vk_layout, None); }
     }
 
 }

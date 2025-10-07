@@ -20,18 +20,18 @@ impl RenderSync {
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let image_available = {
                 let create_info = vk::SemaphoreCreateInfo::default();
-                unsafe { devices.logical.create_semaphore(&create_info, None)? }
+                unsafe { devices.logical.instance.create_semaphore(&create_info, None)? }
             };
             image_available_semaphores.push(image_available);
             let render_completed = {
                 let create_info = vk::SemaphoreCreateInfo::default();
-                unsafe { devices.logical.create_semaphore(&create_info, None)? }
+                unsafe { devices.logical.instance.create_semaphore(&create_info, None)? }
             };
             render_completed_semaphores.push(render_completed);
             let fence = {
                 let create_info = vk::FenceCreateInfo::default()
                     .flags(vk::FenceCreateFlags::SIGNALED);
-                unsafe { devices.logical.create_fence(&create_info, None)? }
+                unsafe { devices.logical.instance.create_fence(&create_info, None)? }
             };
             in_flight_fences.push(fence);
         }
@@ -51,16 +51,16 @@ impl RenderSync {
 
     pub fn cleanup(&self, devices: &Devices) {
         self.image_available.iter().for_each(|s| {
-            unsafe { devices.logical.destroy_semaphore(*s, None) };
+            unsafe { devices.logical.instance.destroy_semaphore(*s, None) };
         });
         self.render_completed.iter().for_each(|s| {
-            unsafe { devices.logical.destroy_semaphore(*s, None) };
+            unsafe { devices.logical.instance.destroy_semaphore(*s, None) };
         });
         self.in_flight.iter().for_each(|f| {
-            unsafe { devices.logical.destroy_fence(*f, None) };
+            unsafe { devices.logical.instance.destroy_fence(*f, None) };
         });
         self.images_in_flight.iter().for_each(|f| {
-            unsafe { devices.logical.destroy_fence(*f, None) };
+            unsafe { devices.logical.instance.destroy_fence(*f, None) };
         });
     }
 
@@ -85,7 +85,7 @@ impl RenderSync {
     }
 
     pub fn reset_fences(&self, devices: &Devices) -> Result<()> {
-        unsafe { devices.logical.reset_fences(&[self.get_in_flight_fence()])? };
+        unsafe { devices.logical.instance.reset_fences(&[self.get_in_flight_fence()])? };
         Ok(())
     }
 }

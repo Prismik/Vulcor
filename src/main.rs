@@ -3,10 +3,11 @@ mod synchronous;
 mod core;
 mod pipeline;
 mod math;
+mod cmd;
 
 use anyhow::{anyhow, Result};
 use ash::{ext::debug_utils, vk::{self, Handle}, Device};
-use std::{error::Error, ffi::{CString}, mem::size_of, ptr::copy_nonoverlapping as memcpy};
+use std::{error::Error, ffi::{CString}};
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
@@ -15,8 +16,9 @@ use winit::{
 };
 
 use crate::{
-    core::{context::VulkanContext, logical_device::Devices, physical_device::QueueFamilyIndices}, 
-    pipeline::{render_pipeline::{RenderPipeline, Vertex, VERTICES}, traits::VulkanPipeline}, 
+    cmd::command_pool::CmdPool, 
+    core::{context::VulkanContext, graphics::Devices, physical_device::QueueFamilyIndices}, 
+    pipeline::{render_pipeline::{RenderPipeline}, traits::VulkanPipeline}, 
     swapchain::{SwapchainConfig, SwapchainData}
 };
 
@@ -47,7 +49,7 @@ struct Vulcor {
     framebuffers: Vec<vk::Framebuffer>,
     vertex_buffer: vk::Buffer,
     vertex_buffer_mem: vk::DeviceMemory,
-    command_pool: vk::CommandPool,
+    command_pool: CmdPool,
     command_buffers: Vec<vk::CommandBuffer>,
     sync: synchronous::RenderSync,
     run: bool,
@@ -61,16 +63,16 @@ impl Vulcor {
         let context = VulkanContext::new(CString::new(title)?.as_c_str(), &window)?;
         let messenger = core::debug::setup_debug_messenger(&context);
         let devices = Devices::new(&context)?;
-        let queue_family = QueueFamilyIndices::new(&context, &devices.physical)?;
-        let graphics_queue = unsafe { devices.logical.get_device_queue(queue_family.graphics, 0) };
-        let presentation_queue = unsafe { devices.logical.get_device_queue(queue_family.presentation, 0) };
-        let swapchain = swapchain::SwapchainData::new(&context, &devices.logical, &devices.physical, &window)?;
-        let render_pass = Self::create_render_pass(&devices.logical, &swapchain.config)?;
-        let pipeline = RenderPipeline::new(&devices.logical, &swapchain.config, &render_pass)?;
+        let queue_family = QueueFamilyIndices::new(&context, &devices.physical.instance)?;
+        let graphics_queue = unsafe { devices.logical.instance.get_device_queue(queue_family.graphics, 0) };
+        let presentation_queue = unsafe { devices.logical.instance.get_device_queue(queue_family.presentation, 0) };
+        let swapchain = swapchain::SwapchainData::new(&context, &devices.logical.instance, &devices.physical.instance, &window)?;
+        let render_pass = Self::create_render_pass(&devices.logical.instance, &swapchain.config)?;
+        let pipeline = RenderPipeline::new(&devices.logical.instance, &swapchain.config, &render_pass)?;
         let framebuffers = Self::create_framebuffers(&devices, &swapchain, &render_pass)?;
-        let command_pool = Self::create_command_pool(&devices, &queue_family)?;
-        let (vertex_buffer, vertex_buffer_mem) = unsafe { Self::create_vertex_buffer(&context, &devices)? };
-        let command_buffers = unsafe { Self::create_command_buffers(framebuffers.len() as u32, &devices, &command_pool, &render_pass, &pipeline.instance(), &framebuffers, &vertex_buffer, &swapchain)? };
+        let command_pool = CmdPool::new(&devices.logical, &queue_family)?;
+        let (vertex_buffer, vertex_buffer_mem) = unsafe { devices.create_vertex_buffer(&context)? };
+        let command_buffers = unsafe { command_pool.create_buffers(framebuffers.len() as u32, &devices.logical, &render_pass, &pipeline.instance(), &framebuffers, &vertex_buffer, &swapchain)? };
         let sync = synchronous::RenderSync::new(&devices, &swapchain)?;
         Ok(Self{
             name: title.to_string(),  
@@ -95,94 +97,15 @@ impl Vulcor {
     }
 
     fn recreate_swapchain(&mut self) -> Result<()> {
-        unsafe { self.devices.logical.device_wait_idle()?; }
+        unsafe { self.devices.logical.instance.device_wait_idle()?; }
         self.destroy_swapchain();
-        self.swapchain = swapchain::SwapchainData::new(&self.context, &self.devices.logical, &self.devices.physical, &self.window)?;
-        self.render_pass = Self::create_render_pass(&self.devices.logical, &self.swapchain.config)?;
-        self.pipeline = RenderPipeline::new(&self.devices.logical, &self.swapchain.config, &self.render_pass)?;
+        self.swapchain = swapchain::SwapchainData::new(&self.context, &self.devices.logical.instance, &self.devices.physical.instance, &self.window)?;
+        self.render_pass = Self::create_render_pass(&self.devices.logical.instance, &self.swapchain.config)?;
+        self.pipeline = RenderPipeline::new(&self.devices.logical.instance, &self.swapchain.config, &self.render_pass)?;
         self.framebuffers = Self::create_framebuffers(&self.devices, &self.swapchain, &self.render_pass)?;
-        self.command_buffers = unsafe { Self::create_command_buffers(self.framebuffers.len() as u32, &self.devices, &self.command_pool, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.vertex_buffer, &self.swapchain)? };
+        self.command_buffers = unsafe { self.command_pool.create_buffers(self.framebuffers.len() as u32, &self.devices.logical, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.vertex_buffer, &self.swapchain)? };
         self.sync = synchronous::RenderSync::new(&self.devices, &self.swapchain)?;
         Ok(())
-    }
-
-    fn get_memory_type_index(mem: vk::PhysicalDeviceMemoryProperties, props: vk::MemoryPropertyFlags, reqs: vk::MemoryRequirements) -> Result<u32> {
-        (0..mem.memory_type_count)
-            .find(|i| { 
-                let suitable = (reqs.memory_type_bits & (1 << i)) != 0;
-                let mem_type = mem.memory_types[*i as usize];
-                suitable && mem_type.property_flags.contains(props)
-            })
-            .ok_or_else(|| anyhow!("No suitable memory type found."))
-    }
-
-    unsafe fn create_vertex_buffer(context: &VulkanContext, devices: &Devices) -> Result<(vk::Buffer, vk::DeviceMemory)> {
-        let mem = context.instance.get_physical_device_memory_properties(devices.physical);
-        
-        let create_info = vk::BufferCreateInfo::default()
-            .size((size_of::<Vertex>() * VERTICES.len()) as u64)
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let vertex_buffer = devices.logical.create_buffer(&create_info, None)?;
-
-        let reqs = devices.logical.get_buffer_memory_requirements(vertex_buffer);
-        let mem_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(reqs.size)
-            .memory_type_index(Self::get_memory_type_index(mem, vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE, reqs)?);
-        let vertex_buffer_mem = devices.logical.allocate_memory(&mem_info, None)?;
-        devices.logical.bind_buffer_memory(vertex_buffer, vertex_buffer_mem, 0)?;
-        let mem = devices.logical.map_memory(vertex_buffer_mem, 0, create_info.size, vk::MemoryMapFlags::empty())?;
-        memcpy(VERTICES.as_ptr(), mem.cast(), VERTICES.len());
-        devices.logical.unmap_memory(vertex_buffer_mem);
-        Ok((vertex_buffer, vertex_buffer_mem))
-    }
-
-    unsafe fn create_command_buffers(count: u32, devices: &Devices, command_pool: &vk::CommandPool, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, vertex_buffer: &vk::Buffer, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>> {
-        let allocate_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(*command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(count);
-
-        let command_buffers = devices.logical.allocate_command_buffers(&allocate_info)?;
-        command_buffers.iter()
-            .zip(framebuffers.iter())
-            .for_each(|(command_buffer, framebuffer)| {
-                let inheritance = vk::CommandBufferInheritanceInfo::default();
-                let info = vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::empty())
-                    .inheritance_info(&inheritance);
-                let _ = devices.logical.begin_command_buffer(*command_buffer, &info);
-                let render_area = vk::Rect2D::default()
-                    .offset(vk::Offset2D::default())
-                    .extent(swapchain.config.extent);
-                let clear_color_value = vk::ClearValue {
-                    color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] }
-                };
-                let clear_values = &[clear_color_value];
-                let begin_info = vk::RenderPassBeginInfo::default()
-                    .render_pass(*render_pass)
-                    .framebuffer(*framebuffer)
-                    .render_area(render_area)
-                    .clear_values(clear_values);
-
-                // Setup commands
-                devices.logical.cmd_begin_render_pass(*command_buffer, &begin_info, vk::SubpassContents::INLINE);
-                devices.logical.cmd_bind_pipeline(*command_buffer, vk::PipelineBindPoint::GRAPHICS, *pipeline);
-                devices.logical.cmd_bind_vertex_buffers(*command_buffer, 0, &[*vertex_buffer], &[0]);
-                devices.logical.cmd_draw(*command_buffer, VERTICES.len() as u32, 1, 0, 0);
-                devices.logical.cmd_end_render_pass(*command_buffer);
-                let _ = devices.logical.end_command_buffer(*command_buffer);
-            });
-        Ok(command_buffers)
-    }
-
-    fn create_command_pool(devices: &Devices, queue_family: &QueueFamilyIndices) -> Result<vk::CommandPool> {
-        let create_info = vk::CommandPoolCreateInfo::default()
-            .flags(vk::CommandPoolCreateFlags::empty())
-            .queue_family_index(queue_family.graphics);
-
-        let command_pool = unsafe { devices.logical.create_command_pool(&create_info, None)? };
-        Ok(command_pool)
     }
 
     fn create_framebuffers(devices: &Devices, swapchain: &SwapchainData, render_pass: &vk::RenderPass) -> Result<Vec<vk::Framebuffer>> {
@@ -195,7 +118,7 @@ impl Vulcor {
                     .width(swapchain.config.extent.width)
                     .height(swapchain.config.extent.height)
                     .layers(1);
-                unsafe { devices.logical.create_framebuffer(&create_info, None).unwrap() }
+                unsafe { devices.logical.instance.create_framebuffer(&create_info, None).unwrap() }
             })
             .collect::<Vec<_>>();
 
@@ -238,7 +161,7 @@ impl Vulcor {
     }
 
     fn render(&mut self) -> Result<()> {
-        unsafe { self.devices.logical.wait_for_fences(&[self.sync.get_in_flight_fence()], true, u64::MAX)? };        
+        unsafe { self.devices.logical.instance.wait_for_fences(&[self.sync.get_in_flight_fence()], true, u64::MAX)? };        
         let result = unsafe { self.swapchain.loader.acquire_next_image(
                 self.swapchain.khr, 
                 u64::MAX, 
@@ -256,7 +179,7 @@ impl Vulcor {
         // TODO Possibly encapsulate in sync object 
         let in_flight = self.sync.images_in_flight[image_index as usize];
         if !in_flight.is_null() {
-            unsafe { self.devices.logical.wait_for_fences(&[in_flight], true, u64::MAX)? };
+            unsafe { self.devices.logical.instance.wait_for_fences(&[in_flight], true, u64::MAX)? };
         }
         self.sync.update_image_in_flight(image_index);
 
@@ -271,7 +194,7 @@ impl Vulcor {
             .signal_semaphores(signal_semaphores);
 
         self.sync.reset_fences(&self.devices)?;
-        let _ = unsafe { self.devices.logical.queue_submit(self.graphics_queue, &[submit_info], self.sync.get_in_flight_fence()) };
+        let _ = unsafe { self.devices.logical.instance.queue_submit(self.graphics_queue, &[submit_info], self.sync.get_in_flight_fence()) };
         let swapchains = &[self.swapchain.khr];
         let image_indices = &[image_index as u32];
         let present_info = vk::PresentInfoKHR::default()
@@ -296,14 +219,14 @@ impl Vulcor {
 
     fn cleanup(&mut self) {
         println!("Cleaning up resources...");
-        let _ = unsafe { self.devices.logical.device_wait_idle() };
+        let _ = unsafe { self.devices.logical.instance.device_wait_idle() };
         unsafe {
             self.sync.cleanup(&self.devices);
             self.destroy_swapchain();
-            self.devices.logical.destroy_buffer(self.vertex_buffer, None);
-            self.devices.logical.free_memory(self.vertex_buffer_mem, None);
-            self.devices.logical.destroy_command_pool(self.command_pool, None);
-            self.devices.logical.destroy_device(None);
+            self.devices.logical.instance.destroy_buffer(self.vertex_buffer, None);
+            self.devices.logical.instance.free_memory(self.vertex_buffer_mem, None);
+            self.devices.logical.instance.destroy_command_pool(self.command_pool.instance, None);
+            self.devices.logical.instance.destroy_device(None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {
                 report.destroy_debug_utils_messenger(*callback, None);
             }
@@ -314,10 +237,10 @@ impl Vulcor {
     fn destroy_swapchain(&mut self) {
         unsafe {
             self.framebuffers.iter()
-                .for_each(|f| self.devices.logical.destroy_framebuffer(*f, None));
-            self.devices.logical.free_command_buffers(self.command_pool, &self.command_buffers);
-            self.pipeline.cleanup(&self.devices.logical);
-            self.devices.logical.destroy_render_pass(self.render_pass, None);
+                .for_each(|f| self.devices.logical.instance.destroy_framebuffer(*f, None));
+            self.devices.logical.instance.free_command_buffers(self.command_pool.instance, &self.command_buffers);
+            self.pipeline.cleanup(&self.devices.logical.instance);
+            self.devices.logical.instance.destroy_render_pass(self.render_pass, None);
             self.swapchain.cleanup(&self.devices);
         }
     }

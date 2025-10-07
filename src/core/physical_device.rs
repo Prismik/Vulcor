@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::{collections::{BTreeMap, HashSet}, error::Error, ffi::CStr, fmt::{self, Display, Formatter}};
+use std::{collections::{BTreeMap, HashSet}, ffi::CStr, fmt::{self, Display, Formatter}};
 use ash::vk;
 
 use crate::{core::context::VulkanContext, swapchain::SwapchainSupport};
@@ -7,7 +7,8 @@ use crate::{core::context::VulkanContext, swapchain::SwapchainSupport};
 
 pub struct QueueFamilyIndices {
     pub graphics: u32,
-    pub presentation: u32
+    pub presentation: u32,
+    pub transfer: u32
 }
 
 impl QueueFamilyIndices {
@@ -20,6 +21,11 @@ impl QueueFamilyIndices {
             .position(|p| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
             .map(|i| i as u32);
 
+        let transfer = properties
+            .iter()
+            .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER))
+            .map_or( graphics, |i| Some(i as u32));
+
         let mut presentation = None;
         for (index, _) in properties.iter().enumerate() {
             let supported = unsafe { context.surface_loader.get_physical_device_surface_support(*physical_device, index as u32, context.surface)? };
@@ -29,8 +35,8 @@ impl QueueFamilyIndices {
             }
         }
         
-        if let (Some(graphics), Some(presentation)) = (graphics, presentation) {
-            Ok(Self { graphics, presentation })
+        if let (Some(graphics), Some(presentation), Some(transfer)) = (graphics, presentation, transfer) {
+            Ok(Self { graphics, presentation, transfer })
         } else {
             Err(anyhow!(PhysicalDeviceError::NoSuitableQueueFamily))
         }
@@ -63,7 +69,7 @@ pub struct GraphicsHardware {
 }
 
 impl GraphicsHardware {
-    pub fn new(context: &VulkanContext) -> Result<Self, Box<dyn Error>> {
+    pub fn new(context: &VulkanContext) -> Result<Self> {
         let physical_device = Self::select_physical_device(&context)?;
         Ok(Self { instance: physical_device })
     }
@@ -77,7 +83,7 @@ impl GraphicsHardware {
         return extensions
     }
 
-    fn select_physical_device(context: &VulkanContext) -> Result<vk::PhysicalDevice, Box<dyn Error>> {
+    fn select_physical_device(context: &VulkanContext) -> Result<vk::PhysicalDevice> {
         let devices = unsafe { context.instance.enumerate_physical_devices()? };
         let mut candidates: BTreeMap<i32, vk::PhysicalDevice> = BTreeMap::new();
 
@@ -94,10 +100,10 @@ impl GraphicsHardware {
             if score > 0 {
                 Ok(physical_device)
             } else {
-                Err(Box::new(PhysicalDeviceError::NoSuitableDevice))
+                Err(anyhow!(PhysicalDeviceError::NoSuitableDevice))
             }
         } else {
-            Err(Box::new(PhysicalDeviceError::NoSuitableDevice))
+            Err(anyhow!(PhysicalDeviceError::NoSuitableDevice))
         }
     }
 

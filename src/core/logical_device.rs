@@ -1,22 +1,15 @@
-use std::{error::Error};
 use ash::{vk, Device};
+use anyhow::{Result};
 
 use crate::{core::{context::VulkanContext, physical_device::GraphicsHardware}, QueueFamilyIndices};
 
-pub struct Devices {
-    pub physical: vk::PhysicalDevice,
-    pub logical: Device,
+pub struct GraphicsInterface {
+    pub instance: Device
 }
 
-impl Devices {
-    pub fn new(context: &VulkanContext) -> Result<Self, Box<dyn Error>> {
-        let physical_device = GraphicsHardware::new(context)?;
-        let logical_device = Self::create_logical_device(context, &physical_device.instance)?;
-        Ok(Self { physical: physical_device.instance, logical: logical_device })
-    }
-
-    fn create_logical_device(context: &VulkanContext, physical_device: &vk::PhysicalDevice) -> Result<Device, Box<dyn Error>> {
-        let queue_family = QueueFamilyIndices::new(context, physical_device)?;
+impl GraphicsInterface {
+    pub fn new(context: &VulkanContext, physical_device: &GraphicsHardware) -> Result<GraphicsInterface> {
+        let queue_family = QueueFamilyIndices::new(context, &physical_device.instance)?;
         let queue_priority = &[1.0];
         let queue_create_infos = queue_family.unique_values().iter().map(|family_index|
             vk::DeviceQueueCreateInfo::default()
@@ -31,7 +24,7 @@ impl Devices {
             .enabled_features(&features)
             .enabled_extension_names(&extensions);
 
-        let device = unsafe { context.instance.create_device(*physical_device, &device_create_info, None)? };
-        Ok(device)
+        let device = unsafe { context.instance.create_device(physical_device.instance, &device_create_info, None)? };
+        Ok(Self { instance: device })
     }
 }

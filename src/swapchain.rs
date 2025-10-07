@@ -62,7 +62,7 @@ impl SwapchainData {
     pub fn cleanup(&self, devices: &Devices) {
         unsafe {
             self.image_views.iter()
-                .for_each(|v| devices.logical.destroy_image_view(*v, None));
+                .for_each(|v| devices.logical.instance.destroy_image_view(*v, None));
             self.loader.destroy_swapchain(self.khr, None);
         }
     }

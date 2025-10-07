@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result};
 use std::{ffi::CString};
 use ash::{vk, Device};
 use cgmath::{vec2, vec3};

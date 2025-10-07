@@ -1,6 +1,6 @@
 use anyhow::{Result};
 use ash::vk;
-use crate::{Devices, swapchain::SwapchainData};
+use crate::{core::graphics::Graphics, swapchain::SwapchainData};
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
@@ -13,25 +13,25 @@ pub struct RenderSync {
 }
 
 impl RenderSync {
-    pub fn new(devices: &Devices, swapchain: &SwapchainData) -> Result<Self> {
+    pub fn new(graphics: &Graphics, swapchain: &SwapchainData) -> Result<Self> {
         let mut image_available_semaphores: Vec<vk::Semaphore> = vec![];
         let mut render_completed_semaphores: Vec<vk::Semaphore> = vec![];
         let mut in_flight_fences: Vec<vk::Fence> = vec![];
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let image_available = {
                 let create_info = vk::SemaphoreCreateInfo::default();
-                unsafe { devices.logical.instance.create_semaphore(&create_info, None)? }
+                unsafe { graphics.logical.instance.create_semaphore(&create_info, None)? }
             };
             image_available_semaphores.push(image_available);
             let render_completed = {
                 let create_info = vk::SemaphoreCreateInfo::default();
-                unsafe { devices.logical.instance.create_semaphore(&create_info, None)? }
+                unsafe { graphics.logical.instance.create_semaphore(&create_info, None)? }
             };
             render_completed_semaphores.push(render_completed);
             let fence = {
                 let create_info = vk::FenceCreateInfo::default()
                     .flags(vk::FenceCreateFlags::SIGNALED);
-                unsafe { devices.logical.instance.create_fence(&create_info, None)? }
+                unsafe { graphics.logical.instance.create_fence(&create_info, None)? }
             };
             in_flight_fences.push(fence);
         }
@@ -49,18 +49,18 @@ impl RenderSync {
         })
     }
 
-    pub fn cleanup(&self, devices: &Devices) {
+    pub fn cleanup(&self, graphics: &Graphics) {
         self.image_available.iter().for_each(|s| {
-            unsafe { devices.logical.instance.destroy_semaphore(*s, None) };
+            unsafe { graphics.logical.instance.destroy_semaphore(*s, None) };
         });
         self.render_completed.iter().for_each(|s| {
-            unsafe { devices.logical.instance.destroy_semaphore(*s, None) };
+            unsafe { graphics.logical.instance.destroy_semaphore(*s, None) };
         });
         self.in_flight.iter().for_each(|f| {
-            unsafe { devices.logical.instance.destroy_fence(*f, None) };
+            unsafe { graphics.logical.instance.destroy_fence(*f, None) };
         });
         self.images_in_flight.iter().for_each(|f| {
-            unsafe { devices.logical.instance.destroy_fence(*f, None) };
+            unsafe { graphics.logical.instance.destroy_fence(*f, None) };
         });
     }
 
@@ -84,8 +84,8 @@ impl RenderSync {
         self.images_in_flight[index] = self.get_in_flight_fence();
     }
 
-    pub fn reset_fences(&self, devices: &Devices) -> Result<()> {
-        unsafe { devices.logical.instance.reset_fences(&[self.get_in_flight_fence()])? };
+    pub fn reset_fences(&self, graphics: &Graphics) -> Result<()> {
+        unsafe { graphics.logical.instance.reset_fences(&[self.get_in_flight_fence()])? };
         Ok(())
     }
 }

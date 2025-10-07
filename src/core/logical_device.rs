@@ -8,8 +8,7 @@ pub struct GraphicsInterface {
 }
 
 impl GraphicsInterface {
-    pub fn new(context: &VulkanContext, physical_device: &GraphicsHardware) -> Result<GraphicsInterface> {
-        let queue_family = QueueFamilyIndices::new(context, &physical_device.instance)?;
+    pub fn new(context: &VulkanContext, physical_device: &GraphicsHardware, queue_family: &QueueFamilyIndices) -> Result<GraphicsInterface> {
         let queue_priority = &[1.0];
         let queue_create_infos = queue_family.unique_values().iter().map(|family_index|
             vk::DeviceQueueCreateInfo::default()

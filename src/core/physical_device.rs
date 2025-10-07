@@ -43,7 +43,7 @@ impl QueueFamilyIndices {
     }
 
     pub fn unique_values(&self) -> HashSet<u32> {
-        return HashSet::from([self.graphics, self.presentation]);
+        return HashSet::from([self.graphics, self.presentation, self.transfer]);
     }
 }
 

@@ -2,7 +2,7 @@ use anyhow::{Result};
 use ash::{khr::swapchain, vk::{self, Extent2D, SwapchainKHR}, Device};
 use winit::window::Window;
 
-use crate::{core::context::VulkanContext, Devices, QueueFamilyIndices};
+use crate::{core::context::VulkanContext, Graphics, QueueFamilyIndices};
 
 #[derive(Clone, Debug)]
 pub struct SwapchainSupport {
@@ -59,10 +59,10 @@ impl SwapchainData {
         })
     }
 
-    pub fn cleanup(&self, devices: &Devices) {
+    pub fn cleanup(&self, graphics: &Graphics) {
         unsafe {
             self.image_views.iter()
-                .for_each(|v| devices.logical.instance.destroy_image_view(*v, None));
+                .for_each(|v| graphics.logical.instance.destroy_image_view(*v, None));
             self.loader.destroy_swapchain(self.khr, None);
         }
     }

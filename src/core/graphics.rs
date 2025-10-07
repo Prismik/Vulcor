@@ -1,41 +1,72 @@
 use anyhow::{anyhow, Result};
-use ash::vk;
-use std::{ptr::copy_nonoverlapping as memcpy};
+use ash::vk::{self, SubmitInfo};
 
-use crate::{core::{context::VulkanContext, logical_device::GraphicsInterface, physical_device::GraphicsHardware}, pipeline::render_pipeline::{Vertex, VERTICES}};
+use crate::{cmd::command_pool::CmdPool, core::{context::VulkanContext, logical_device::GraphicsInterface, physical_device::{GraphicsHardware, QueueFamilyIndices}}, pipeline::render_pipeline::{Vertex, VERTICES}};
 
 
-pub struct Devices {
+pub struct Graphics {
     pub physical: GraphicsHardware,
     pub logical: GraphicsInterface,
+    pub queue: vk::Queue
 }
 
-impl Devices {
+impl Graphics {
     pub fn new(context: &VulkanContext) -> Result<Self> {
         let physical = GraphicsHardware::new(context)?;
-        let logical = GraphicsInterface::new(context, &physical)?;
-        Ok(Self { physical, logical: logical })
+        let queue_family = QueueFamilyIndices::new(context, &physical.instance)?;
+        let logical = GraphicsInterface::new(context, &physical, &queue_family)?;
+        let graphics_queue = unsafe { logical.instance.get_device_queue(queue_family.graphics, 0) };
+        
+        Ok(Self { physical, logical, queue: graphics_queue })
     }
 
-    pub unsafe fn create_vertex_buffer(&self, context: &VulkanContext) -> Result<(vk::Buffer, vk::DeviceMemory)> {
+    pub unsafe fn create_buffer(&self, context: &VulkanContext, size: vk::DeviceSize, usage: vk::BufferUsageFlags, props: vk::MemoryPropertyFlags) -> Result<(vk::Buffer, vk::DeviceMemory)> {
         let mem = context.instance.get_physical_device_memory_properties(self.physical.instance);
-        
         let create_info = vk::BufferCreateInfo::default()
-            .size((size_of::<Vertex>() * VERTICES.len()) as u64)
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+            .size(size)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let vertex_buffer = self.logical.instance.create_buffer(&create_info, None)?;
+        let buffer = self.logical.instance.create_buffer(&create_info, None)?;
 
-        let reqs = self.logical.instance.get_buffer_memory_requirements(vertex_buffer);
+        let reqs = self.logical.instance.get_buffer_memory_requirements(buffer);
         let mem_info = vk::MemoryAllocateInfo::default()
             .allocation_size(reqs.size)
-            .memory_type_index(self.get_memory_type_index(mem, vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE, reqs)?);
-        let vertex_buffer_mem = self.logical.instance.allocate_memory(&mem_info, None)?;
-        self.logical.instance.bind_buffer_memory(vertex_buffer, vertex_buffer_mem, 0)?;
-        let mem = self.logical.instance.map_memory(vertex_buffer_mem, 0, create_info.size, vk::MemoryMapFlags::empty())?;
-        memcpy(VERTICES.as_ptr(), mem.cast(), VERTICES.len());
-        self.logical.instance.unmap_memory(vertex_buffer_mem);
-        Ok((vertex_buffer, vertex_buffer_mem))
+            .memory_type_index(self.get_memory_type_index(mem, props, reqs)?);
+        let buffer_mem = self.logical.instance.allocate_memory(&mem_info, None)?;
+        self.logical.instance.bind_buffer_memory(buffer, buffer_mem, 0)?;
+
+        Ok((buffer, buffer_mem))
+    }
+
+    pub unsafe fn copy_buffer(&self, src: &vk::Buffer, dst: &vk::Buffer, size: vk::DeviceSize, cmd_pool: &CmdPool) -> Result<()> {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_pool(cmd_pool.instance)
+            .command_buffer_count(1);
+
+        let command_buffer = self.logical.instance.allocate_command_buffers(&allocate_info)?[0];
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        self.logical.instance.begin_command_buffer(command_buffer, &begin_info)?; // Begin
+        let regions = vk::BufferCopy::default().size(size);
+        self.logical.instance.cmd_copy_buffer(command_buffer, *src, *dst, &[regions]);
+        self.logical.instance.end_command_buffer(command_buffer)?; // End
+
+        let command_buffers = &[command_buffer];
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(command_buffers);
+
+        self.queue_submit(&vec![submit_info], vk::Fence::null())?;
+        self.logical.instance.queue_wait_idle(self.queue)?;
+        self.logical.instance.free_command_buffers(cmd_pool.instance, command_buffers);
+        Ok(())
+    }
+
+    pub fn queue_submit(&self, submits: &Vec<SubmitInfo>, fence: vk::Fence) -> Result<()> {
+        unsafe { self.logical.instance.queue_submit(self.queue, submits, fence)? };
+        Ok(())
     }
 
     fn get_memory_type_index(&self, mem: vk::PhysicalDeviceMemoryProperties, props: vk::MemoryPropertyFlags, reqs: vk::MemoryRequirements) -> Result<u32> {

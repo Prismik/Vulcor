@@ -1,17 +1,17 @@
 use anyhow::{Result};
 use ash::vk;
 
-use crate::{core::{logical_device::GraphicsInterface, physical_device::QueueFamilyIndices}, pipeline::render_pipeline::VERTICES, swapchain::SwapchainData};
+use crate::{core::{logical_device::GraphicsInterface}, pipeline::render_pipeline::VERTICES, swapchain::SwapchainData};
 
 pub struct CmdPool {
     pub instance: vk::CommandPool
 }
 
 impl CmdPool {
-    pub fn new(device: &GraphicsInterface, queue_family: &QueueFamilyIndices) -> Result<Self> {
+    pub fn new(device: &GraphicsInterface, queue_family: u32) -> Result<Self> {
         let create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::empty())
-            .queue_family_index(queue_family.graphics);
+            .queue_family_index(queue_family);
 
         let command_pool = unsafe { device.instance.create_command_pool(&create_info, None)? };
         Ok(Self { instance: command_pool })

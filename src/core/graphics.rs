@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
 use ash::vk::{self, SubmitInfo};
 
@@ -17,25 +19,7 @@ impl Graphics {
         let logical = GraphicsInterface::new(context, &physical, &queue_family)?;
         let graphics_queue = unsafe { logical.instance.get_device_queue(queue_family.graphics, 0) };
         
-        Ok(Self { physical, logical, queue: graphics_queue })
-    }
-
-    pub unsafe fn create_buffer(&self, context: &VulkanContext, size: vk::DeviceSize, usage: vk::BufferUsageFlags, props: vk::MemoryPropertyFlags) -> Result<(vk::Buffer, vk::DeviceMemory)> {
-        let mem = context.instance.get_physical_device_memory_properties(self.physical.instance);
-        let create_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let buffer = self.logical.instance.create_buffer(&create_info, None)?;
-
-        let reqs = self.logical.instance.get_buffer_memory_requirements(buffer);
-        let mem_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(reqs.size)
-            .memory_type_index(self.get_memory_type_index(mem, props, reqs)?);
-        let buffer_mem = self.logical.instance.allocate_memory(&mem_info, None)?;
-        self.logical.instance.bind_buffer_memory(buffer, buffer_mem, 0)?;
-
-        Ok((buffer, buffer_mem))
+        Ok(Self { physical: physical, logical: logical, queue: graphics_queue })
     }
 
     pub unsafe fn copy_buffer(&self, src: &vk::Buffer, dst: &vk::Buffer, size: vk::DeviceSize, cmd_pool: &CmdPool) -> Result<()> {
@@ -67,15 +51,5 @@ impl Graphics {
     pub fn queue_submit(&self, submits: &Vec<SubmitInfo>, fence: vk::Fence) -> Result<()> {
         unsafe { self.logical.instance.queue_submit(self.queue, submits, fence)? };
         Ok(())
-    }
-
-    fn get_memory_type_index(&self, mem: vk::PhysicalDeviceMemoryProperties, props: vk::MemoryPropertyFlags, reqs: vk::MemoryRequirements) -> Result<u32> {
-        (0..mem.memory_type_count)
-            .find(|i| { 
-                let suitable = (reqs.memory_type_bits & (1 << i)) != 0;
-                let mem_type = mem.memory_types[*i as usize];
-                suitable && mem_type.property_flags.contains(props)
-            })
-            .ok_or_else(|| anyhow!("No suitable memory type found."))
     }
 }

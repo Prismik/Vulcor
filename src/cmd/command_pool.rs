@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use anyhow::{Result};
 use ash::vk;
 
-use crate::{core::{logical_device::GraphicsInterface}, pipeline::render_pipeline::VERTICES, swapchain::SwapchainData};
+use crate::{core::{graphics::Graphics, logical_device::GraphicsInterface}, pipeline::render_pipeline::{INDICES, VERTICES}, resources::buffer::Buffer, swapchain::SwapchainData};
 
 pub struct CmdPool {
     pub instance: vk::CommandPool
@@ -17,7 +19,7 @@ impl CmdPool {
         Ok(Self { instance: command_pool })
     }
 
-    pub unsafe fn create_buffers(&self, count: u32, device: &GraphicsInterface, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, vertex_buffer: &vk::Buffer, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>> {
+    pub unsafe fn create_buffers(&self, count: u32, device: &GraphicsInterface, render_pass: &vk::RenderPass, pipeline: &vk::Pipeline, framebuffers: &Vec<vk::Framebuffer>, vertex_buffer: &Buffer, index_buffer: &Buffer, swapchain: &SwapchainData) -> Result<Vec<vk::CommandBuffer>> {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.instance)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -48,8 +50,9 @@ impl CmdPool {
                 // Setup commands
                 device.instance.cmd_begin_render_pass(*command_buffer, &begin_info, vk::SubpassContents::INLINE);
                 device.instance.cmd_bind_pipeline(*command_buffer, vk::PipelineBindPoint::GRAPHICS, *pipeline);
-                device.instance.cmd_bind_vertex_buffers(*command_buffer, 0, &[*vertex_buffer], &[0]);
-                device.instance.cmd_draw(*command_buffer, VERTICES.len() as u32, 1, 0, 0);
+                device.instance.cmd_bind_vertex_buffers(*command_buffer, 0, &[vertex_buffer.instance], &[0]);
+                device.instance.cmd_bind_index_buffer(*command_buffer, index_buffer.instance, 0, vk::IndexType::UINT16);
+                device.instance.cmd_draw_indexed(*command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
                 device.instance.cmd_end_render_pass(*command_buffer);
                 let _ = device.instance.end_command_buffer(*command_buffer);
             });

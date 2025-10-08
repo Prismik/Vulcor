@@ -4,10 +4,11 @@ mod core;
 mod pipeline;
 mod math;
 mod cmd;
+mod resources;
 
 use anyhow::{anyhow, Result};
 use ash::{ext::debug_utils, vk::{self, Handle}, Device};
-use std::{error::Error, ffi::CString, ptr::copy_nonoverlapping as memcpy};
+use std::{error::Error, ffi::CString, ptr::copy_nonoverlapping as memcpy, sync::Arc};
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
@@ -16,10 +17,7 @@ use winit::{
 };
 
 use crate::{
-    cmd::command_pool::CmdPool, 
-    core::{context::VulkanContext, graphics::Graphics, physical_device::QueueFamilyIndices}, 
-    pipeline::{render_pipeline::{RenderPipeline, Vertex, VERTICES}, traits::VulkanPipeline}, 
-    swapchain::{SwapchainConfig, SwapchainData}
+    cmd::command_pool::CmdPool, core::{context::VulkanContext, graphics::Graphics, physical_device::QueueFamilyIndices}, pipeline::{render_pipeline::{RenderPipeline, Vertex, INDICES, VERTICES}, traits::VulkanPipeline}, resources::buffer::Buffer, swapchain::{SwapchainConfig, SwapchainData}
 };
 
 
@@ -46,8 +44,8 @@ struct Vulcor {
     render_pass: vk::RenderPass,
     pipeline: RenderPipeline,
     framebuffers: Vec<vk::Framebuffer>,
-    vertex_buffer: vk::Buffer,
-    vertex_buffer_mem: vk::DeviceMemory,
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
     command_pool: CmdPool,
     command_buffers: Vec<vk::CommandBuffer>,
     sync: synchronous::RenderSync,
@@ -69,8 +67,9 @@ impl Vulcor {
         let pipeline = RenderPipeline::new(&graphics.logical.instance, &swapchain.config, &render_pass)?;
         let framebuffers = Self::create_framebuffers(&graphics, &swapchain, &render_pass)?;
         let command_pool = CmdPool::new(&graphics.logical, queue_family.graphics)?;
-        let (vertex_buffer, vertex_buffer_mem) = unsafe { Self::create_vertex_buffer(&context, &graphics, &command_pool)? };
-        let command_buffers = unsafe { command_pool.create_buffers(framebuffers.len() as u32, &graphics.logical, &render_pass, &pipeline.instance(), &framebuffers, &vertex_buffer, &swapchain)? };
+        let vertex_buffer = unsafe { Self::create_vertex_buffer(&context, &graphics, &command_pool)? };
+        let index_buffer = unsafe { Self::create_index_buffer(&context, &graphics, &command_pool)? };
+        let command_buffers = unsafe { command_pool.create_buffers(framebuffers.len() as u32, &graphics.logical, &render_pass, &pipeline.instance(), &framebuffers, &vertex_buffer, &index_buffer, &swapchain)? };
         let sync = synchronous::RenderSync::new(&graphics, &swapchain)?;
         Ok(Self{
             name: title.to_string(),  
@@ -84,7 +83,7 @@ impl Vulcor {
             pipeline,
             framebuffers,
             vertex_buffer,
-            vertex_buffer_mem,
+            index_buffer,
             command_pool,
             command_buffers,
             sync,
@@ -100,38 +99,65 @@ impl Vulcor {
         self.render_pass = Self::create_render_pass(&self.graphics.logical.instance, &self.swapchain.config)?;
         self.pipeline = RenderPipeline::new(&self.graphics.logical.instance, &self.swapchain.config, &self.render_pass)?;
         self.framebuffers = Self::create_framebuffers(&self.graphics, &self.swapchain, &self.render_pass)?;
-        self.command_buffers = unsafe { self.command_pool.create_buffers(self.framebuffers.len() as u32, &self.graphics.logical, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.vertex_buffer, &self.swapchain)? };
+        self.command_buffers = unsafe { self.command_pool.create_buffers(self.framebuffers.len() as u32, &self.graphics.logical, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.vertex_buffer, &self.index_buffer, &self.swapchain)? };
         self.sync = synchronous::RenderSync::new(&self.graphics, &self.swapchain)?;
         Ok(())
     }
 
     // Potentially move in graphics module
-    unsafe fn create_vertex_buffer(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool) -> Result<(vk::Buffer, vk::DeviceMemory)> {
+    unsafe fn create_vertex_buffer(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool) -> Result<Buffer> {
         let size = (size_of::<Vertex>() * VERTICES.len()) as u64;
 
-        let (staging_buffer, staging_buffer_mem) = graphics.create_buffer(
+        let staging_buffer = Buffer::new(
             context, 
+            graphics, 
             size, 
             vk::BufferUsageFlags::TRANSFER_SRC, 
             vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
         )?;
 
-        let mem = graphics.logical.instance.map_memory(staging_buffer_mem, 0, size, vk::MemoryMapFlags::empty())?;
+        let mem = graphics.logical.instance.map_memory(staging_buffer.memory, 0, size, vk::MemoryMapFlags::empty())?;
         memcpy(VERTICES.as_ptr(), mem.cast(), VERTICES.len());
-        graphics.logical.instance.unmap_memory(staging_buffer_mem);
+        graphics.logical.instance.unmap_memory(staging_buffer.memory);
 
-        let (vertex_buffer, vertex_buffer_mem) = graphics.create_buffer(
+        let vertex_buffer = Buffer::new(
             context, 
-            size, 
+            graphics, 
+            size,
             vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
             vk::MemoryPropertyFlags::DEVICE_LOCAL
         )?;
 
-        graphics.copy_buffer(&staging_buffer, &vertex_buffer, size, cmd_pool)?;
-        graphics.logical.instance.destroy_buffer(staging_buffer, None);
-        graphics.logical.instance.free_memory(staging_buffer_mem, None);
+        graphics.copy_buffer(&staging_buffer.instance, &vertex_buffer.instance, size, cmd_pool)?;
+        staging_buffer.cleanup(graphics);
 
-        Ok((vertex_buffer, vertex_buffer_mem))
+        Ok(vertex_buffer)
+    }
+
+    unsafe fn create_index_buffer(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool) -> Result<Buffer> {
+        let size = (size_of::<u16>() * INDICES.len()) as u64;
+        let staging_buffer = Buffer::new(
+            context, 
+            graphics, 
+            size, 
+            vk::BufferUsageFlags::TRANSFER_SRC, 
+            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+        )?;
+
+        let mem = graphics.logical.instance.map_memory(staging_buffer.memory, 0, size, vk::MemoryMapFlags::empty())?;
+        memcpy(INDICES.as_ptr(), mem.cast(), INDICES.len());
+        graphics.logical.instance.unmap_memory(staging_buffer.memory);
+
+        let index_buffer = Buffer::new(
+            context, 
+            graphics, 
+            size,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL
+        )?;
+        graphics.copy_buffer(&staging_buffer.instance, &index_buffer.instance, size, cmd_pool)?;
+        staging_buffer.cleanup(graphics);
+        Ok(index_buffer)
     }
 
     fn create_framebuffers(graphics: &Graphics, swapchain: &SwapchainData, render_pass: &vk::RenderPass) -> Result<Vec<vk::Framebuffer>> {
@@ -249,8 +275,8 @@ impl Vulcor {
         unsafe {
             self.sync.cleanup(&self.graphics);
             self.destroy_swapchain();
-            self.graphics.logical.instance.destroy_buffer(self.vertex_buffer, None);
-            self.graphics.logical.instance.free_memory(self.vertex_buffer_mem, None);
+            self.vertex_buffer.cleanup(&self.graphics);
+            self.index_buffer.cleanup(&self.graphics);
             self.graphics.logical.instance.destroy_command_pool(self.command_pool.instance, None);
             self.graphics.logical.instance.destroy_device(None);
             if let Some((report, callback)) = self.messenger.as_ref().take() {

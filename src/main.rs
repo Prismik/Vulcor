@@ -5,10 +5,12 @@ mod pipeline;
 mod math;
 mod cmd;
 mod resources;
+mod descriptor;
 
 use anyhow::{anyhow, Result};
-use ash::{ext::debug_utils, vk::{self, Handle}, Device};
-use std::{error::Error, ffi::CString, ptr::copy_nonoverlapping as memcpy, sync::Arc};
+use ash::{ext::debug_utils, vk::{self, Extent2D, Handle}, Device};
+use cgmath::{point3, vec3, Deg, EuclideanSpace, Point3};
+use std::{error::Error, ffi::CString, ptr::copy_nonoverlapping as memcpy, time::Instant};
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
@@ -17,19 +19,26 @@ use winit::{
 };
 
 use crate::{
-    cmd::command_pool::CmdPool, core::{context::VulkanContext, graphics::Graphics, physical_device::QueueFamilyIndices}, pipeline::{render_pipeline::{RenderPipeline, Vertex, INDICES, VERTICES}, traits::VulkanPipeline}, resources::buffer::Buffer, swapchain::{SwapchainConfig, SwapchainData}
+    cmd::command_pool::CmdPool, 
+    core::{context::VulkanContext, graphics::Graphics,  physical_device::QueueFamilyIndices}, 
+    descriptor::descriptor_pool::DescriptorPool, 
+    math::{matrix::{Mat4, MVP}, vector::Vec3}, 
+    pipeline::{render_pipeline::{RenderPipeline, Vertex, INDICES, VERTICES}, traits::VulkanPipeline}, 
+    resources::buffer::Buffer, 
+    swapchain::{SwapchainConfig, SwapchainData}
 };
 
 
 struct App {
     name: String,
     vulcor: Option<Vulcor>,
-    minimized: bool
+    minimized: bool,
+    start: Instant
 }
 
 impl App {
     fn new() -> App {
-        Self { name: "Vulcor".to_string(), vulcor: None, minimized: false }
+        Self { name: "Vulcor".to_string(), vulcor: None, minimized: false, start: Instant::now() }
     }
 }
 
@@ -42,19 +51,22 @@ struct Vulcor {
     presentation_queue: vk::Queue,
     swapchain: SwapchainData,
     render_pass: vk::RenderPass,
+    descriptor_pool: DescriptorPool,
     pipeline: RenderPipeline,
     framebuffers: Vec<vk::Framebuffer>,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
+    uniform_buffers: Vec<Buffer>,
     command_pool: CmdPool,
     command_buffers: Vec<vk::CommandBuffer>,
     sync: synchronous::RenderSync,
     run: bool,
-    resized: bool
+    resized: bool,
+    start: Instant
 }
 
 impl Vulcor {
-    fn new(window: Window) -> Result<Self, Box<dyn Error>> {
+    fn new(window: Window, start: Instant) -> Result<Self, Box<dyn Error>> {
         info!("Creating application");
         let title = "Vulcor";
         let context = VulkanContext::new(CString::new(title)?.as_c_str(), &window)?;
@@ -64,12 +76,14 @@ impl Vulcor {
         let presentation_queue = unsafe { graphics.logical.instance.get_device_queue(queue_family.presentation, 0) };
         let swapchain = swapchain::SwapchainData::new(&context, &graphics.logical.instance, &graphics.physical.instance, &window)?;
         let render_pass = Self::create_render_pass(&graphics.logical.instance, &swapchain.config)?;
-        let pipeline = RenderPipeline::new(&graphics.logical.instance, &swapchain.config, &render_pass)?;
-        let framebuffers = Self::create_framebuffers(&graphics, &swapchain, &render_pass)?;
         let command_pool = CmdPool::new(&graphics.logical, queue_family.graphics)?;
+        let uniform_buffers = unsafe { Self::create_uniform_buffers(&context, &graphics, &swapchain)? };
+        let descriptor_pool = DescriptorPool::new(swapchain.images.len() as u32, &graphics, &uniform_buffers)?;
+        let pipeline = RenderPipeline::new(&graphics.logical.instance, &swapchain.config, &render_pass, descriptor_pool.layout)?;
+        let framebuffers = Self::create_framebuffers(&graphics, &swapchain, &render_pass)?;
         let vertex_buffer = unsafe { Self::create_vertex_buffer(&context, &graphics, &command_pool)? };
         let index_buffer = unsafe { Self::create_index_buffer(&context, &graphics, &command_pool)? };
-        let command_buffers = unsafe { command_pool.create_buffers(framebuffers.len() as u32, &graphics.logical, &render_pass, &pipeline.instance(), &framebuffers, &vertex_buffer, &index_buffer, &swapchain)? };
+        let command_buffers = unsafe { command_pool.create_buffers(&graphics.logical, &render_pass, &pipeline, &framebuffers, &vertex_buffer, &index_buffer, &swapchain, &descriptor_pool.sets)? };
         let sync = synchronous::RenderSync::new(&graphics, &swapchain)?;
         Ok(Self{
             name: title.to_string(),  
@@ -80,15 +94,18 @@ impl Vulcor {
             presentation_queue,
             swapchain,
             render_pass,
+            descriptor_pool,
             pipeline,
             framebuffers,
             vertex_buffer,
             index_buffer,
+            uniform_buffers,
             command_pool,
             command_buffers,
             sync,
             run: true,
-            resized: false
+            resized: false,
+            start
         })
     }
 
@@ -97,25 +114,41 @@ impl Vulcor {
         self.destroy_swapchain();
         self.swapchain = swapchain::SwapchainData::new(&self.context, &self.graphics.logical.instance, &self.graphics.physical.instance, &self.window)?;
         self.render_pass = Self::create_render_pass(&self.graphics.logical.instance, &self.swapchain.config)?;
-        self.pipeline = RenderPipeline::new(&self.graphics.logical.instance, &self.swapchain.config, &self.render_pass)?;
+        self.pipeline = RenderPipeline::new(&self.graphics.logical.instance, &self.swapchain.config, &self.render_pass, self.descriptor_pool.layout)?;
         self.framebuffers = Self::create_framebuffers(&self.graphics, &self.swapchain, &self.render_pass)?;
-        self.command_buffers = unsafe { self.command_pool.create_buffers(self.framebuffers.len() as u32, &self.graphics.logical, &self.render_pass, &self.pipeline.instance(), &self.framebuffers, &self.vertex_buffer, &self.index_buffer, &self.swapchain)? };
+        self.uniform_buffers = unsafe { Self::create_uniform_buffers(&self.context, &self.graphics, &self.swapchain)? };
+        self.descriptor_pool = DescriptorPool::new(self.swapchain.images.len() as u32, &self.graphics, &self.uniform_buffers)?;
+        self.command_buffers = unsafe { self.command_pool.create_buffers(&self.graphics.logical, &self.render_pass, &self.pipeline, &self.framebuffers, &self.vertex_buffer, &self.index_buffer, &self.swapchain, &self.descriptor_pool.sets)? };
         self.sync = synchronous::RenderSync::new(&self.graphics, &self.swapchain)?;
         Ok(())
     }
 
     // Potentially move in graphics module
     unsafe fn create_vertex_buffer(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool) -> Result<Buffer> {
-        let vertex_buffer = Self::create_buffer(context, graphics, cmd_pool, &VERTICES, vk::BufferUsageFlags::VERTEX_BUFFER)?;
+        let vertex_buffer = Self::create_buffer(context, graphics, cmd_pool, &VERTICES, vk::BufferUsageFlags::VERTEX_BUFFER, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
         Ok(vertex_buffer)
     }
 
     unsafe fn create_index_buffer(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool) -> Result<Buffer> {
-        let index_buffer = Self::create_buffer(context, graphics, cmd_pool, INDICES, vk::BufferUsageFlags::INDEX_BUFFER)?;
+        let index_buffer = Self::create_buffer(context, graphics, cmd_pool, INDICES, vk::BufferUsageFlags::INDEX_BUFFER, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
         Ok(index_buffer)
     }
 
-    unsafe fn create_buffer<T>(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool, data: &[T], usage: vk::BufferUsageFlags) -> Result<Buffer> {
+    unsafe fn create_uniform_buffers(context: &VulkanContext, graphics: &Graphics, swapchain: &SwapchainData) -> Result<Vec<Buffer>> {
+        let buffers: Vec<Buffer> = swapchain.images.iter().filter_map({|_|
+            Buffer::new(
+                context, 
+                graphics, 
+                size_of::<MVP>() as u64,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+            ).ok()
+        }).collect();
+
+        Ok(buffers)
+    }
+
+    unsafe fn create_buffer<T>(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool, data: &[T], usage: vk::BufferUsageFlags, props: vk::MemoryPropertyFlags) -> Result<Buffer> {
         let size = (size_of::<T>() * data.len()) as u64;
         let staging_buffer = Buffer::new(
             context, 
@@ -134,7 +167,7 @@ impl Vulcor {
             graphics, 
             size,
             vk::BufferUsageFlags::TRANSFER_DST | usage,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL
+            props
         )?;
         graphics.copy_buffer(&staging_buffer.instance, &new_buffer.instance, size, cmd_pool)?;
         staging_buffer.cleanup(graphics);
@@ -215,7 +248,7 @@ impl Vulcor {
             unsafe { self.graphics.logical.instance.wait_for_fences(&[in_flight], true, u64::MAX)? };
         }
         self.sync.update_image_in_flight(image_index);
-
+        unsafe { self.update_uniform_buffer(image_index)? };
         let wait_semaphores = &[self.sync.get_image_available()];
         let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let command_buffers = &[self.command_buffers[image_index]];
@@ -240,7 +273,7 @@ impl Vulcor {
             self.recreate_swapchain()?;
         } else {
             match result {
-                Ok(false) => self.recreate_swapchain()?,
+                //Ok(false) => self.recreate_swapchain()?,
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.recreate_swapchain()?,
                 Err(e) => return Err(anyhow!(e)),
                 _ => {}
@@ -250,12 +283,38 @@ impl Vulcor {
         Ok(())
     }
 
+    unsafe fn update_uniform_buffer(&self, image_index: usize) -> Result<()> {
+        let time = self.start.elapsed().as_secs_f32();
+        let model = Mat4::from_axis_angle(Vec3::unit_z(), Deg(90.0) * time);
+        let view = Mat4::look_at_rh(point3(2.0, 2.0, 2.0), Point3::origin(), Vec3::unit_z());
+        let mut proj = cgmath::perspective(
+            Deg(45.0), 
+            self.swapchain.config.extent.width as f32 / self.swapchain.config.extent.height as f32,
+            0.1, 
+            10.0
+        );
+        // Invert y axis
+        proj[1][1] *= -1.0;
+
+        let mvp = MVP { model, view, proj };
+        let mem = self.graphics.logical.instance.map_memory(
+            self.uniform_buffers[image_index].memory, 
+            0, 
+            size_of::<MVP>() as u64, 
+            vk::MemoryMapFlags::empty()
+        )?;
+        memcpy(&mvp, mem.cast(), 1);
+        self.graphics.logical.instance.unmap_memory(self.uniform_buffers[image_index].memory);
+        Ok(())
+    }
+
     fn cleanup(&mut self) {
         println!("Cleaning up resources...");
         let _ = unsafe { self.graphics.logical.instance.device_wait_idle() };
         unsafe {
             self.sync.cleanup(&self.graphics);
             self.destroy_swapchain();
+            self.graphics.logical.instance.destroy_descriptor_set_layout(self.descriptor_pool.layout, None);
             self.vertex_buffer.cleanup(&self.graphics);
             self.index_buffer.cleanup(&self.graphics);
             self.graphics.logical.instance.destroy_command_pool(self.command_pool.instance, None);
@@ -269,6 +328,9 @@ impl Vulcor {
 
     fn destroy_swapchain(&mut self) {
         unsafe {
+            self.descriptor_pool.cleanup(&self.graphics);
+            self.uniform_buffers.iter()
+                .for_each(|b| b.cleanup(&self.graphics));
             self.framebuffers.iter()
                 .for_each(|f| self.graphics.logical.instance.destroy_framebuffer(*f, None));
             self.graphics.logical.instance.free_command_buffers(self.command_pool.instance, &self.command_buffers);
@@ -285,7 +347,7 @@ impl ApplicationHandler for App {
             None => {
                 let window_attributes = Window::default_attributes().with_title(self.name.as_str());
                 let window = event_loop.create_window(window_attributes).unwrap();
-                self.vulcor = match Vulcor::new(window) {
+                self.vulcor = match Vulcor::new(window, self.start) {
                     Ok(vulcor) => Some(vulcor),
                     Err(error) => panic!("FATAL ERROR ENCOUNTERED => {}", error)
                 };
@@ -297,7 +359,10 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
         let app = self.vulcor.as_mut().unwrap();
         if app.run {
-            let _ = app.render();
+            let result = app.render();
+            if result.is_err() {
+                panic!("ERROR DURING RENDER");
+            }
         }
     }
 

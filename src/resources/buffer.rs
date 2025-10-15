@@ -7,6 +7,7 @@ use crate::{cmd::command_pool::CmdPool, core::{context::VulkanContext, graphics:
 pub struct Buffer {
     pub instance: vk::Buffer, 
     pub memory: vk::DeviceMemory,
+    size: u64
 }
 
 impl Buffer {
@@ -25,7 +26,14 @@ impl Buffer {
         let buffer_mem = unsafe { graphics.logical.instance.allocate_memory(&mem_info, None)? };
         unsafe { graphics.logical.instance.bind_buffer_memory(buffer, buffer_mem, 0)? };
 
-        Ok(Self { instance: buffer, memory: buffer_mem })
+        Ok(Self { instance: buffer, memory: buffer_mem, size })
+    }
+
+    pub fn descriptor_buffer_info(&self) -> vk::DescriptorBufferInfo {
+        vk::DescriptorBufferInfo::default()
+            .buffer(self.instance)
+            .offset(0)
+            .range(self.size)
     }
 
     pub fn cleanup(&self, graphics: &Graphics) {

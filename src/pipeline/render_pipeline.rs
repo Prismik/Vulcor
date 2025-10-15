@@ -61,15 +61,17 @@ pub struct RenderPipeline {
 }
 
 impl RenderPipeline {
-    fn create_layout(logical_device: &Device) -> Result<vk::PipelineLayout> {
-        let layout_info = vk::PipelineLayoutCreateInfo::default();
+    fn create_layout(logical_device: &Device, set_layout: vk::DescriptorSetLayout) -> Result<vk::PipelineLayout> {
+        let set_layouts = &[set_layout];
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(set_layouts);
         let layout = unsafe { logical_device.create_pipeline_layout(&layout_info, None)? };
         Ok(layout)
     }
 }
 
 impl VulkanPipeline for RenderPipeline {
-    fn new(logical_device: &Device, config: &SwapchainConfig, render_pass: &vk::RenderPass) -> Result<Self> {
+    fn new(logical_device: &Device, config: &SwapchainConfig, render_pass: &vk::RenderPass, set_layout: vk::DescriptorSetLayout) -> Result<Self> {
         let vert = Shader::new("shaders/shader.vert.spv", logical_device)?;
         let frag = Shader::new("shaders/shader.frag.spv", logical_device)?;
         let main = CString::new("main")?;
@@ -112,7 +114,7 @@ impl VulkanPipeline for RenderPipeline {
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::CLOCKWISE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false);
 
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
@@ -136,7 +138,7 @@ impl VulkanPipeline for RenderPipeline {
             .attachments(attachments)
             .blend_constants([0.0, 0.0, 0.0, 0.0]);
         
-        let layout = Self::create_layout(logical_device)?;
+        let layout = Self::create_layout(logical_device, set_layout)?;
         let stages = &[vert_stage, frag_stage];
         let graphics_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)

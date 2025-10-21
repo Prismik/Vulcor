@@ -9,8 +9,9 @@ mod descriptor;
 
 use anyhow::{anyhow, Result};
 use ash::{ext::debug_utils, vk::{self, Extent2D, Handle}, Device};
+use image::{GenericImageView, ImageReader};
 use cgmath::{point3, vec3, Deg, EuclideanSpace, Point3};
-use std::{error::Error, ffi::CString, ptr::copy_nonoverlapping as memcpy, time::Instant};
+use std::{error::Error, ffi::CString, io::Read, ptr::copy_nonoverlapping as memcpy, time::Instant};
 use log::{info};
 use winit::{
     application::ApplicationHandler, event::WindowEvent, 
@@ -24,7 +25,7 @@ use crate::{
     descriptor::descriptor_pool::DescriptorPool, 
     math::{matrix::{Mat4, MVP}, vector::Vec3}, 
     pipeline::{render_pipeline::{RenderPipeline, Vertex, INDICES, VERTICES}, traits::VulkanPipeline}, 
-    resources::buffer::Buffer, 
+    resources::{buffer::Buffer, image::Image}, 
     swapchain::{SwapchainConfig, SwapchainData}
 };
 
@@ -57,6 +58,7 @@ struct Vulcor {
     vertex_buffer: Buffer,
     index_buffer: Buffer,
     uniform_buffers: Vec<Buffer>,
+    texture_image: Image,
     command_pool: CmdPool,
     command_buffers: Vec<vk::CommandBuffer>,
     sync: synchronous::RenderSync,
@@ -77,6 +79,7 @@ impl Vulcor {
         let swapchain = swapchain::SwapchainData::new(&context, &graphics.logical.instance, &graphics.physical.instance, &window)?;
         let render_pass = Self::create_render_pass(&graphics.logical.instance, &swapchain.config)?;
         let command_pool = CmdPool::new(&graphics.logical, queue_family.graphics)?;
+        let texture_image = unsafe { Self::create_texture_image(&context, &graphics)? };
         let uniform_buffers = unsafe { Self::create_uniform_buffers(&context, &graphics, &swapchain)? };
         let descriptor_pool = DescriptorPool::new(swapchain.images.len() as u32, &graphics, &uniform_buffers)?;
         let pipeline = RenderPipeline::new(&graphics.logical.instance, &swapchain.config, &render_pass, descriptor_pool.layout)?;
@@ -100,6 +103,7 @@ impl Vulcor {
             vertex_buffer,
             index_buffer,
             uniform_buffers,
+            texture_image,
             command_pool,
             command_buffers,
             sync,
@@ -174,11 +178,40 @@ impl Vulcor {
         Ok(new_buffer)
     }
 
+    unsafe fn create_texture_image(context: &VulkanContext, graphics: &Graphics) -> Result<Image> {
+        let img = ImageReader::open("resources/texture.png")?.decode()?;
+        let pixels = img.as_bytes();
+        let size = (size_of::<u8>() * pixels.len()) as u64;
+        let staging_buffer = Buffer::new(
+            context, 
+            graphics, 
+            size, 
+            vk::BufferUsageFlags::TRANSFER_SRC, 
+            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+        )?;
+
+        let mem = graphics.logical.instance.map_memory(staging_buffer.memory, 0, size, vk::MemoryMapFlags::empty())?;
+        memcpy(pixels.as_ptr(), mem.cast(), pixels.len());
+        graphics.logical.instance.unmap_memory(staging_buffer.memory);
+
+        let image = Image::new(
+            context, 
+            graphics, 
+            img.dimensions(), 
+            size, 
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageTiling::OPTIMAL
+        )?;
+        Ok(image)
+    }
+
     fn create_framebuffers(graphics: &Graphics, swapchain: &SwapchainData, render_pass: &vk::RenderPass) -> Result<Vec<vk::Framebuffer>> {
         let framebuffers = swapchain.image_views.iter()
             .map(|img| {
                 let attachments = &[*img];
-                let create_info = vk::FramebufferCreateInfo::default()
+                let create_info: vk::FramebufferCreateInfo<'_> = vk::FramebufferCreateInfo::default()
                     .render_pass(*render_pass)
                     .attachments(attachments)
                     .width(swapchain.config.extent.width)

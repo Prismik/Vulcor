@@ -6,6 +6,8 @@ use crate::{core::{context::VulkanContext, graphics::Graphics}};
 pub struct Image {
     pub instance: vk::Image, 
     pub memory: vk::DeviceMemory,
+    pub width: u32,
+    pub height: u32,
     size: u64
 }
 
@@ -42,7 +44,7 @@ impl Image {
         let img_mem = unsafe { graphics.logical.instance.allocate_memory(&mem_info, None)? };
         unsafe { graphics.logical.instance.bind_image_memory(img, img_mem, 0)? };
 
-        Ok(Self { instance: img, memory: img_mem, size })
+        Ok(Self { instance: img, memory: img_mem, width: extent.0, height: extent.1, size })
     }
 
     fn get_memory_type_index(mem: vk::PhysicalDeviceMemoryProperties, props: vk::MemoryPropertyFlags, reqs: vk::MemoryRequirements) -> Result<u32> {
@@ -53,5 +55,12 @@ impl Image {
                 suitable && mem_type.property_flags.contains(props)
             })
             .ok_or_else(|| anyhow!("No suitable memory type found."))
+    }
+
+     pub fn cleanup(&self, graphics: &Graphics) {
+        unsafe {
+            graphics.logical.instance.destroy_image(self.instance, None);
+            graphics.logical.instance.free_memory(self.memory, None);
+        }
     }
 }

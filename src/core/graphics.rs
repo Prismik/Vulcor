@@ -59,7 +59,7 @@ impl Graphics {
         Ok(())
     }
 
-    pub fn transition_img_layout(&self, cmd_pool: &CmdPool, image: Image, format: vk::Format, old: vk::ImageLayout, new: vk::ImageLayout) -> Result<()> {
+    pub fn transition_img_layout(&self, cmd_pool: &CmdPool, image: &Image, format: vk::Format, old: vk::ImageLayout, new: vk::ImageLayout) -> Result<()> {
         let command_buffer = self.begin_command_once(cmd_pool)?;
         let subresource = vk::ImageSubresourceRange::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -67,6 +67,26 @@ impl Graphics {
             .level_count(1)
             .base_array_layer(0)
             .layer_count(1);
+        let (
+            src_access_mask,
+            dst_access_mask,
+            src_stage_mask,
+            dst_stage_mask,
+        ) = match (old, new) {
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            _ => return Err(anyhow!("Unsupported image layout transition!")),
+        };
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(old)
             .new_layout(new)
@@ -74,13 +94,13 @@ impl Graphics {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image.instance)
             .subresource_range(subresource)
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::empty());
+            .src_access_mask(src_access_mask)
+            .dst_access_mask(dst_access_mask);
         unsafe {
             self.logical.instance.cmd_pipeline_barrier(
                 command_buffer, 
-                vk::PipelineStageFlags::empty(), 
-                vk::PipelineStageFlags::empty(), 
+                src_stage_mask, 
+                dst_stage_mask, 
                 vk::DependencyFlags::empty(), 
                 &[] as &[vk::MemoryBarrier], 
                 &[] as &[vk::BufferMemoryBarrier], 

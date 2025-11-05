@@ -79,7 +79,7 @@ impl Vulcor {
         let swapchain = swapchain::SwapchainData::new(&context, &graphics.logical.instance, &graphics.physical.instance, &window)?;
         let render_pass = Self::create_render_pass(&graphics.logical.instance, &swapchain.config)?;
         let command_pool = CmdPool::new(&graphics.logical, queue_family.graphics)?;
-        let texture_image = unsafe { Self::create_texture_image(&context, &graphics)? };
+        let texture_image = unsafe { Self::create_texture_image(&context, &graphics, &command_pool)? };
         let uniform_buffers = unsafe { Self::create_uniform_buffers(&context, &graphics, &swapchain)? };
         let descriptor_pool = DescriptorPool::new(swapchain.images.len() as u32, &graphics, &uniform_buffers)?;
         let pipeline = RenderPipeline::new(&graphics.logical.instance, &swapchain.config, &render_pass, descriptor_pool.layout)?;
@@ -178,7 +178,7 @@ impl Vulcor {
         Ok(new_buffer)
     }
 
-    unsafe fn create_texture_image(context: &VulkanContext, graphics: &Graphics) -> Result<Image> {
+    unsafe fn create_texture_image(context: &VulkanContext, graphics: &Graphics, cmd_pool: &CmdPool) -> Result<Image> {
         let img = ImageReader::open("resources/texture.png")?.decode()?;
         let pixels = img.as_bytes();
         let size = (size_of::<u8>() * pixels.len()) as u64;
@@ -204,6 +204,25 @@ impl Vulcor {
             vk::Format::R8G8B8A8_SRGB,
             vk::ImageTiling::OPTIMAL
         )?;
+
+        graphics.transition_img_layout(
+            cmd_pool, 
+            &image, 
+            vk::Format::R8G8B8A8_SRGB, 
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL
+        )?;
+        
+        staging_buffer.copy_to_img(&image, graphics, cmd_pool)?;
+
+        graphics.transition_img_layout(
+            cmd_pool, 
+            &image, 
+            vk::Format::R8G8B8A8_SRGB, 
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL, 
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        )?;
+        staging_buffer.cleanup(&graphics);
         Ok(image)
     }
 
@@ -347,6 +366,7 @@ impl Vulcor {
         unsafe {
             self.sync.cleanup(&self.graphics);
             self.destroy_swapchain();
+            self.texture_image.cleanup(&self.graphics);
             self.graphics.logical.instance.destroy_descriptor_set_layout(self.descriptor_pool.layout, None);
             self.vertex_buffer.cleanup(&self.graphics);
             self.index_buffer.cleanup(&self.graphics);

@@ -1,7 +1,7 @@
 use ash::vk;
 use anyhow::{anyhow, Result};
 
-use crate::{core::{context::VulkanContext, graphics::Graphics}};
+use crate::{cmd::command_pool::CmdPool, core::{context::VulkanContext, graphics::Graphics}, resources::image::Image};
 
 pub struct Buffer {
     pub instance: vk::Buffer, 
@@ -35,6 +35,26 @@ impl Buffer {
             .range(self.size)
     }
 
+    pub fn copy_to_img(&self, img: &Image, graphics: &Graphics, cmd_pool: &CmdPool) -> Result<()> {
+        let command_buffer = graphics.begin_command_once(cmd_pool)?;
+        let subresource = vk::ImageSubresourceLayers::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .mip_level(0)
+            .base_array_layer(0)
+            .layer_count(1);
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(subresource)
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0})
+            .image_extent(vk::Extent3D {width: img.width, height: img.height, depth: 1 });
+
+        unsafe { graphics.logical.instance.cmd_copy_buffer_to_image(command_buffer, self.instance, img.instance, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]) };
+        graphics.end_command_once(cmd_pool, command_buffer)?;
+        Ok(())
+    }
+    
     pub fn cleanup(&self, graphics: &Graphics) {
         unsafe {
             graphics.logical.instance.destroy_buffer(self.instance, None);
@@ -42,6 +62,7 @@ impl Buffer {
         }
     }
 
+    // TODO Move into reusable functions in a base Resource class?
     fn get_memory_type_index(mem: vk::PhysicalDeviceMemoryProperties, props: vk::MemoryPropertyFlags, reqs: vk::MemoryRequirements) -> Result<u32> {
         (0..mem.memory_type_count)
             .find(|i| { 
